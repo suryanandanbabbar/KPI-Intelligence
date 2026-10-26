@@ -90,6 +90,10 @@ class CanonicalReport:
     page_count: int = 0
     visual_count: int = 0
     report_configuration: Dict[str, Any] = field(default_factory=dict)
+    owner_id: Optional[uuid.UUID] = None
+    owner_name: Optional[str] = None
+    last_accessed_at: Optional[datetime] = None
+    lifecycle_status: str = "ORPHANED"
 
 
 @dataclass

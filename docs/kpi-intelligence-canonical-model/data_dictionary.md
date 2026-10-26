@@ -169,24 +169,29 @@ Every field is classified into one of five architectural tiers:
 ---
 
 ### 6. `reports`
-- **Purpose**: Specialized analytical dashboard/report package header entity.
+- **Purpose**: Specialized analytical dashboard/report package header entity tracking dashboard ownership, access history, and lifecycle status.
 - **Data Grain**: One record per dashboard, workbook canvas, dossier, or liveboard.
 - **Primary Key**: `report_id` (UUID).
 - **Foreign Keys**:
   - `object_id` (UNIQUE) references `analytical_objects(object_id)` ON DELETE CASCADE.
   - `default_page_object_id` references `analytical_objects(object_id)` ON DELETE SET NULL.
+  - `owner_id` references `security_principals(principal_id)` ON DELETE SET NULL.
 - **Populating Platforms**: All platforms.
 
 | Column | SQL Type | Nullable | Default | Constraints | Classification | Description & Meaning |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `report_id` | UUID | No | `gen_random_uuid()` | PK | Canonical | Specialized report ID. |
 | `object_id` | UUID | No | None | FK -> `analytical_objects`, UNIQUE | Canonical | Associated polymorphic analytical object. |
-| `report_type` | TEXT | No | None | None | Canonical | Report category (`INTERACTIVE_DASHBOARD`, `PAGINATED`, `LIVEBOARD`). |
+| `report_type` | TEXT | No | None | None | Canonical | Report category (`INTERACTIVE_DASHBOARD`, `PAGINATED`, `LIVEBOARD`, `POWER_BI_PBIP`). |
 | `report_definition`| JSONB | No | `'{}'::jsonb` | None | Canonical | Normalized presentation definition tree. |
 | `default_page_object_id`| UUID | Yes | None | FK -> `analytical_objects` | Canonical | Pointer to default landing page. |
 | `page_count` | INTEGER | No | `0` | None | Inferred | Total page/tab count. |
 | `visual_count` | INTEGER | No | `0` | None | Inferred | Total visual component count. |
 | `report_configuration`| JSONB| No | `'{}'::jsonb` | None | Source-Native | Platform-specific canvas settings (theme, palette, canvas size). |
+| `owner_id` | UUID | Yes | None | FK -> `security_principals` | Canonical | Canonical principal identifier of the dashboard owner. |
+| `owner_name` | TEXT | Yes | None | None | Canonical | Display name of the owner, if supported by the source platform. |
+| `last_accessed_at` | TIMESTAMPTZ | Yes | None | None | Canonical | Timestamp of most recent verified user access (UTC). |
+| `lifecycle_status` | TEXT | No | `'ORPHANED'` | CHECK (`'ACTIVE'`, `'DORMANT'`, `'ORPHANED'`, `'UNCLASSIFIED'`) | Inferred | Canonical lifecycle state maintained via trigger/batch refresh. |
 | `created_at` | TIMESTAMPTZ | No | `clock_timestamp()` | None | Operational | Row creation timestamp. |
 
 ---
@@ -1543,3 +1548,16 @@ Every field is classified into one of five architectural tiers:
 | `new_payload` | JSONB | Yes | None | None | Governance | JSON payload after change. |
 | `change_justification`| TEXT| No | None | None | Governance | Mandatory justification for ontology modification. |
 | `created_at` | TIMESTAMPTZ | No | `clock_timestamp()` | None | Operational | Event timestamp. |
+
+---
+
+## Canonical Operational Views
+
+### `v_dashboard_lifecycle`
+- **Purpose**: Canonical dashboard lifecycle reporting view joining reports, polymorphic analytical objects, assets, and security principals.
+- **Security / Redaction**: Inherits Row Level Security (RLS) from `analytical_objects` and `assets` (filtered by transaction-local `current_tenant_id()`).
+- **Calculated Attributes**:
+  - `days_since_last_access`: Number of integer days elapsed between `last_accessed_at` and `CURRENT_TIMESTAMP`.
+  - `active_cutoff_date`: Evaluation boundary (`CURRENT_TIMESTAMP - INTERVAL '6 months'`).
+  - `is_dormant_candidate`: Boolean flag indicating if dashboard is eligible for archival/decommissioning (`lifecycle_status IN ('DORMANT', 'ORPHANED')`).
+

@@ -319,8 +319,17 @@ CREATE TABLE kpi_intel.reports (
     page_count INTEGER NOT NULL DEFAULT 0,
     visual_count INTEGER NOT NULL DEFAULT 0,
     report_configuration JSONB NOT NULL DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+    owner_id UUID, -- Foreign key to security_principals added after table 29
+    owner_name TEXT,
+    last_accessed_at TIMESTAMPTZ,
+    lifecycle_status TEXT NOT NULL DEFAULT 'ORPHANED',
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT ck_reports_lifecycle_status CHECK (lifecycle_status IN ('ACTIVE', 'DORMANT', 'ORPHANED', 'UNCLASSIFIED'))
 );
+
+CREATE INDEX idx_reports_lifecycle_status ON kpi_intel.reports (lifecycle_status);
+CREATE INDEX idx_reports_owner_id ON kpi_intel.reports (owner_id) WHERE owner_id IS NOT NULL;
+CREATE INDEX idx_reports_last_accessed_at ON kpi_intel.reports (last_accessed_at) WHERE last_accessed_at IS NOT NULL;
 
 -- 7. report_pages
 -- Individual pages, tabs, canvas sheets, or story points within a report.
@@ -677,7 +686,96 @@ WHERE source_native_id IS NOT NULL;
 
 CREATE UNIQUE INDEX uq_security_principals_name 
 ON kpi_intel.security_principals (tenant_id, platform, principal_name) 
-WHERE source_native_id IS NULL;
+-- Add circular foreign key from reports to security_principals now that security_principals exists
+ALTER TABLE kpi_intel.reports
+ADD CONSTRAINT fk_reports_owner
+FOREIGN KEY (owner_id)
+REFERENCES kpi_intel.security_principals(principal_id)
+ON DELETE SET NULL;
+
+-- Classification function
+CREATE OR REPLACE FUNCTION kpi_intel.classify_report_lifecycle(
+    p_owner_id UUID,
+    p_last_accessed_at TIMESTAMPTZ,
+    p_classification_timestamp TIMESTAMPTZ DEFAULT clock_timestamp()
+)
+RETURNS TEXT AS $$
+BEGIN
+    IF p_owner_id IS NULL THEN
+        RETURN 'ORPHANED';
+    ELSIF p_last_accessed_at IS NULL THEN
+        RETURN 'UNCLASSIFIED';
+    ELSIF p_last_accessed_at <= (p_classification_timestamp - INTERVAL '6 months') THEN
+        RETURN 'DORMANT';
+    ELSE
+        RETURN 'ACTIVE';
+    END IF;
+END;
+$$ LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE SECURITY INVOKER SET search_path = pg_catalog, kpi_intel;
+
+CREATE OR REPLACE FUNCTION kpi_intel.sync_report_lifecycle_status()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF NEW.lifecycle_status IS NULL OR TG_OP = 'INSERT' OR 
+       (OLD.owner_id IS DISTINCT FROM NEW.owner_id) OR 
+       (OLD.last_accessed_at IS DISTINCT FROM NEW.last_accessed_at) THEN
+        NEW.lifecycle_status := kpi_intel.classify_report_lifecycle(
+            NEW.owner_id,
+            NEW.last_accessed_at,
+            clock_timestamp()
+        );
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog, kpi_intel;
+
+DROP TRIGGER IF EXISTS trg_reports_lifecycle_status ON kpi_intel.reports;
+CREATE TRIGGER trg_reports_lifecycle_status
+BEFORE INSERT OR UPDATE ON kpi_intel.reports
+FOR EACH ROW EXECUTE FUNCTION kpi_intel.sync_report_lifecycle_status();
+
+CREATE OR REPLACE FUNCTION kpi_intel.refresh_report_lifecycle_status(
+    p_as_of TIMESTAMPTZ DEFAULT clock_timestamp()
+)
+RETURNS INTEGER AS $$
+DECLARE
+    v_updated_count INTEGER := 0;
+BEGIN
+    UPDATE kpi_intel.reports r
+    SET lifecycle_status = kpi_intel.classify_report_lifecycle(r.owner_id, r.last_accessed_at, p_as_of)
+    WHERE r.lifecycle_status IS DISTINCT FROM kpi_intel.classify_report_lifecycle(r.owner_id, r.last_accessed_at, p_as_of);
+
+    GET DIAGNOSTICS v_updated_count = ROW_COUNT;
+    RETURN v_updated_count;
+END;
+$$ LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog, kpi_intel;
+
+-- Canonical view exposing dashboard lifecycle with inherited RLS
+CREATE OR REPLACE VIEW kpi_intel.v_dashboard_lifecycle AS
+SELECT
+    r.report_id,
+    r.object_id,
+    ao.asset_version_id,
+    ao.tenant_id,
+    av.asset_id,
+    a.asset_name,
+    ao.canonical_name AS report_name,
+    ao.display_name AS report_display_name,
+    ao.platform,
+    r.report_type,
+    r.owner_id,
+    COALESCE(r.owner_name, sp.principal_name) AS owner_name,
+    r.last_accessed_at,
+    clock_timestamp() AS classification_timestamp,
+    kpi_intel.classify_report_lifecycle(r.owner_id, r.last_accessed_at, clock_timestamp()) AS lifecycle_status,
+    r.page_count,
+    r.visual_count,
+    r.created_at
+FROM kpi_intel.reports r
+JOIN kpi_intel.analytical_objects ao ON ao.object_id = r.object_id
+JOIN kpi_intel.asset_versions av ON av.asset_version_id = ao.asset_version_id
+JOIN kpi_intel.assets a ON a.asset_id = av.asset_id
+LEFT JOIN kpi_intel.security_principals sp ON sp.principal_id = r.owner_id;
 
 -- 30. security_object_permissions
 -- Explicit permissions granted on analytical objects to security principals.
@@ -1880,6 +1978,7 @@ REVOKE UPDATE, DELETE, TRUNCATE ON kpi_intel.mapping_audit_events, kpi_intel.ont
 GRANT SELECT, INSERT ON kpi_intel.mapping_audit_events, kpi_intel.ontology_change_events TO kpi_app_user;
 
 GRANT SELECT ON ALL TABLES IN SCHEMA kpi_intel TO kpi_readonly;
+GRANT SELECT ON kpi_intel.v_dashboard_lifecycle TO kpi_app_user, kpi_readonly;
 
 -- Revoke execution from PUBLIC to enforce least-privilege role boundaries
 REVOKE ALL ON FUNCTION kpi_intel.current_tenant_id() FROM PUBLIC;
@@ -1889,6 +1988,8 @@ REVOKE ALL ON FUNCTION kpi_intel.clear_current_tenant_id() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION kpi_intel.current_tenant_id() TO kpi_app_user, kpi_readonly;
 GRANT EXECUTE ON FUNCTION kpi_intel.set_current_tenant_id(UUID) TO kpi_app_user;
 GRANT EXECUTE ON FUNCTION kpi_intel.clear_current_tenant_id() TO kpi_app_user;
+GRANT EXECUTE ON FUNCTION kpi_intel.classify_report_lifecycle(UUID, TIMESTAMPTZ, TIMESTAMPTZ) TO kpi_app_user, kpi_readonly;
+GRANT EXECUTE ON FUNCTION kpi_intel.refresh_report_lifecycle_status(TIMESTAMPTZ) TO kpi_app_user;
 
 
 -- ============================================================================

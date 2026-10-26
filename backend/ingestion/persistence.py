@@ -11,6 +11,7 @@ Enforces:
 
 import json
 import uuid
+from datetime import datetime
 from typing import Dict, List, Optional, Any, Tuple
 from backend.ingestion.models import CanonicalIngestionBundle, CanonicalAnalyticalObject
 
@@ -23,6 +24,8 @@ def _format_sql_value(val: Any) -> str:
         return "TRUE" if val else "FALSE"
     if isinstance(val, (int, float)):
         return str(val)
+    if isinstance(val, datetime):
+        return f"'{val.isoformat()}'::timestamptz"
     if isinstance(val, uuid.UUID):
         return f"'{str(val)}'::uuid"
     if isinstance(val, (dict, list)):
@@ -149,15 +152,24 @@ WHERE asset_id = {_format_sql_value(a.asset_id)} AND tenant_id = {_format_sql_va
         # 6. reports
         for rep in bundle.reports:
             statements.append(f"""INSERT INTO kpi_intel.reports (
-    report_id, object_id, report_type, report_definition, page_count, visual_count, report_configuration
+    report_id, object_id, report_type, report_definition, page_count, visual_count,
+    report_configuration, owner_id, owner_name, last_accessed_at, lifecycle_status
 ) VALUES (
     {_format_sql_value(rep.report_id)}, {_format_sql_value(rep.object_id)}, {_format_sql_value(rep.report_type)},
     {_format_sql_value(rep.report_definition)}, {_format_sql_value(rep.page_count)}, {_format_sql_value(rep.visual_count)},
-    {_format_sql_value(rep.report_configuration)}
+    {_format_sql_value(rep.report_configuration)}, {_format_sql_value(rep.owner_id)}, {_format_sql_value(rep.owner_name)},
+    {_format_sql_value(rep.last_accessed_at)}, {_format_sql_value(rep.lifecycle_status)}
 ) ON CONFLICT (object_id) DO UPDATE SET
     page_count = EXCLUDED.page_count,
     visual_count = EXCLUDED.visual_count,
-    report_definition = EXCLUDED.report_definition;""")
+    report_definition = EXCLUDED.report_definition,
+    owner_id = COALESCE(EXCLUDED.owner_id, kpi_intel.reports.owner_id),
+    owner_name = COALESCE(EXCLUDED.owner_name, kpi_intel.reports.owner_name),
+    last_accessed_at = COALESCE(EXCLUDED.last_accessed_at, kpi_intel.reports.last_accessed_at),
+    lifecycle_status = kpi_intel.classify_report_lifecycle(
+        COALESCE(EXCLUDED.owner_id, kpi_intel.reports.owner_id),
+        COALESCE(EXCLUDED.last_accessed_at, kpi_intel.reports.last_accessed_at)
+    );""")
 
         # 7. report_pages
         for page in bundle.pages:

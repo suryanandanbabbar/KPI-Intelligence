@@ -241,6 +241,18 @@ All platform-specific abstractions are projected into a unified polymorphous sch
   * Security & Sources: `filters`, `filter_assignments`, `security_roles`, `security_role_filters`, `security_principals`, `security_object_permissions`, `data_sources`, `query_dependencies`.
   * Excel-Specific: `spreadsheet_cells`, `pivot_caches`, `pivot_tables`, `pivot_field_assignments`, `spreadsheet_objects`, `spreadsheet_rules`.
 
+- **Dashboard Ownership & Lifecycle Governance (`reports`, `v_dashboard_lifecycle`)**:
+  * Dashboard entities in `reports` maintain verified ownership (`owner_id` FK -> `security_principals`, `owner_name`), runtime access history (`last_accessed_at` TIMESTAMPTZ), and canonical lifecycle status (`lifecycle_status`).
+  * **Classification Precedence**:
+    1. `ORPHANED`: `owner_id IS NULL`.
+    2. `UNCLASSIFIED`: `owner_id IS NOT NULL AND last_accessed_at IS NULL`.
+    3. `DORMANT`: `owner_id IS NOT NULL AND last_accessed_at <= (CURRENT_TIMESTAMP - INTERVAL '6 months')`.
+    4. `ACTIVE`: `owner_id IS NOT NULL AND last_accessed_at > (CURRENT_TIMESTAMP - INTERVAL '6 months')`.
+  * **Calendar Arithmetic**: Uses native PostgreSQL `INTERVAL '6 months'` with leap-year and variable month length clamping (never a 180-day approximation).
+  * **Automated Maintenance**: Synchronized on insert/update via `trg_reports_lifecycle_status` and available for scheduled re-indexing via `refresh_report_lifecycle_status(:tenant_id, :as_of)`.
+  * **Downstream Reporting**: Exposed through `v_dashboard_lifecycle` with fail-closed Row Level Security.
+  * **Source Boundary**: Power BI Desktop (`.pbip`) files are developer artifacts containing definitions but zero runtime view logs. Runtime access history is reserved for Power BI Service Activity Events API / Unified Audit Log ingestion.
+
 ### 3.4 Tier 4: Normalisation & Lineage Graph
 1. **Expression Normalisation (`calculations`)**:
    - Original calculation expressions are preserved verbatim in `expression_text`.

@@ -96,7 +96,7 @@ The normalizer transforms extracted ASTs into the 61-table canonical schema:
 | | `asset_versions` | Release snapshot | `asset_version_id` (UUIDv5), `version_number`, `content_hash`, `raw_content_hash`, `structure_hash`, `metadata_hash`, `extraction_status` |
 | | `source_artifacts` | Individual bundle files | `source_artifact_id`, `relative_path`, `artifact_type`, `content_hash`, `size_bytes`, `is_supported` |
 | **B. Analytical Objects** | `analytical_objects` | Polymorphic identity registry | Universal registry row for every semantic model, table, column, calculation, relationship, report, page, visual, bookmark, and named expression. Enforces `parent_object_id` hierarchy. |
-| | `reports` | `.Report` folder | `report_id`, `object_id`, `report_type='POWER_BI_PBIP'`, `page_count`, `visual_count`, `report_configuration` |
+| | `reports` | `.Report` folder | `report_id`, `object_id`, `report_type='POWER_BI_PBIP'`, `page_count`, `visual_count`, `report_configuration`, `owner_id`, `owner_name`, `last_accessed_at`, `lifecycle_status` |
 | | `report_pages` | `report.json` sections | `page_id`, `report_id`, `object_id`, `source_native_id`, `page_name`, `page_order`, `page_properties` |
 | | `visuals` | `visualContainers` | `visual_id`, `page_id`, `object_id`, `visual_type`, `visual_title`, `position_x`, `position_y`, `width`, `height`, `z_order` |
 | | `visual_bindings` | Visual projections | `visual_binding_id`, `visual_id`, `object_id` (bound column/calc), `binding_role`, `binding_order` |
@@ -112,6 +112,25 @@ The normalizer transforms extracted ASTs into the 61-table canonical schema:
 | **J. Operations** | `parser_runs` | Execution audit | `parser_run_id`, `asset_version_id`, `tenant_id`, `platform='POWER_BI'`, `parser_name`, `run_status`, `objects_extracted`, `warnings_count`, `errors_count` |
 | | `extraction_errors` | Extraction diagnostics | `extraction_error_id`, `parser_run_id`, `severity`, `error_code`, `error_message`, `is_recoverable` |
 | | `platform_capabilities` | Supported platform matrix | Declared capabilities for `POWER_BI` across TMDL, DAX, relationships, M expressions, bookmarks, and visual bindings. |
+
+---
+
+### 3.1 Dashboard Ownership & Last-Access Analysis
+
+#### Authoritative Source Distinction: Desktop PBIP vs. Runtime Telemetry
+Power BI Project (`.pbip`) files are developer desktop project artifacts designed for local authoring and Git version control. They contain report presentation layout (`report.json`), canvas options, theme references, and tabular model scripts (`definition/*.tmdl`).
+
+* **Absence of Runtime Access Logs in PBIP**: Desktop PBIP repositories do **not** record report view events, user interaction logs, or consumer access timestamps. Runtime telemetry is created only when reports are published to and accessed within the Power BI Service or Fabric workspace.
+* **Authoritative External System of Record**: The authoritative sources for Power BI report access events are:
+  1. **Power BI Service Activity Events API**: `GET https://api.powerbi.com/v1.0/myorg/admin/activityevents?startDateTime='...'&endDateTime='...'` (tracks `ViewReport`, `ExportArtifact`, `DeleteReport` events by user UPN/Object ID).
+  2. **Microsoft 365 Unified Audit Log (UAL)**: Retrieved via `Search-UnifiedAuditLog -RecordType PowerBIAudit` or the Microsoft Graph Management API.
+* **Anti-Pattern Prohibitions**:
+  - The connector **never** synthesizes `last_accessed_at` from filesystem timestamps (`mtime`, `ctime`), Git commit timestamps, or ingestion run timestamps.
+  - The connector **never** infers `owner_id` from local OS filesystem file ownership or Git committer identity.
+* **Normalization & Persistence Contract**:
+  - When authoritative owner/access attributes are absent in the PBIP source, the normalizer populates `owner_id = NULL`, `owner_name = NULL`, and `last_accessed_at = NULL`.
+  - Under the canonical classification rule, an unowned report evaluates to `lifecycle_status = 'ORPHANED'`.
+  - On re-ingestion, SQL `ON CONFLICT (object_id) DO UPDATE` applies `COALESCE(EXCLUDED.owner_id, reports.owner_id)` and `COALESCE(EXCLUDED.last_accessed_at, reports.last_accessed_at)`, ensuring that existing verified ownership or access data populated via service APIs or administrative review is preserved idempotently.
 
 ---
 

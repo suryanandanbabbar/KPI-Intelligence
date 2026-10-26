@@ -8,6 +8,8 @@ bindings, visual properties, bookmarks, and filters.
 
 import os
 import json
+import uuid
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Union
 from backend.connectors.powerbi.jsonc_parser import parse_jsonc, parse_jsonc_file
@@ -87,6 +89,9 @@ class ReportDefinition:
     custom_visuals: List[ReportCustomVisual] = field(default_factory=list)
     report_filters: List[Dict[str, Any]] = field(default_factory=list)
     report_configuration: Dict[str, Any] = field(default_factory=dict)
+    owner_id: Optional[Union[str, uuid.UUID]] = None
+    owner_name: Optional[str] = None
+    last_accessed_at: Optional[datetime] = None
 
 
 def _safe_json_unpack(val: Any) -> Any:
@@ -161,6 +166,20 @@ class ReportParser:
         """Parses report.json contents into ReportDefinition."""
         rep.theme = data.get("theme")
         
+        # Check for authoritative owner/access metadata if explicitly present
+        if "owner_id" in data and data["owner_id"]:
+            rep.owner_id = data["owner_id"]
+        if "owner_name" in data and data["owner_name"]:
+            rep.owner_name = str(data["owner_name"])
+        if "last_accessed_at" in data and data["last_accessed_at"]:
+            if isinstance(data["last_accessed_at"], datetime):
+                rep.last_accessed_at = data["last_accessed_at"]
+            elif isinstance(data["last_accessed_at"], str):
+                try:
+                    rep.last_accessed_at = datetime.fromisoformat(data["last_accessed_at"])
+                except Exception:
+                    pass
+
         # Unpack top-level config (which can be a stringified JSON)
         raw_config = _safe_json_unpack(data.get("config", {}))
         if isinstance(raw_config, dict):

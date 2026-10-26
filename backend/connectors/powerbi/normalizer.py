@@ -10,6 +10,8 @@ fine-grained metadata lineage extraction, and audit tracking.
 import uuid
 import re
 import os
+import calendar
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple, Any
 
 from backend.connectors.powerbi.discovery import PbipProjectStructure
@@ -44,6 +46,61 @@ from backend.ingestion.models import (
 def make_deterministic_uuid(namespace: uuid.UUID, key: str) -> uuid.UUID:
     """Generates a reproducible UUIDv5 from a namespace and string key."""
     return uuid.uuid5(namespace, key)
+
+
+def subtract_calendar_months(dt: datetime, months: int = 6) -> datetime:
+    """
+    Subtracts exact calendar months matching PostgreSQL's `INTERVAL 'n months'` behavior.
+    Handles variable month lengths and leap years via month-end clamping
+    (e.g., Aug 31 - 6 months -> Feb 29 in leap year, Feb 28 in non-leap year).
+    Preserves time components and timezone info.
+    """
+    total_months = dt.year * 12 + (dt.month - 1) - months
+    new_year = total_months // 12
+    new_month = (total_months % 12) + 1
+    _, max_days = calendar.monthrange(new_year, new_month)
+    new_day = min(dt.day, max_days)
+    return dt.replace(year=new_year, month=new_month, day=new_day)
+
+
+def classify_report_lifecycle(
+    owner_id: Optional[Any],
+    last_accessed_at: Optional[datetime],
+    as_of: Optional[datetime] = None,
+) -> str:
+    """
+    Classifies a report/dashboard lifecycle status based on ownership and last access.
+    
+    Precedence:
+    1. ORPHANED: owner_id IS NULL
+    2. UNCLASSIFIED: owner_id IS NOT NULL AND last_accessed_at IS NULL
+    3. DORMANT: owner_id IS NOT NULL AND last_accessed_at <= (as_of - INTERVAL '6 months')
+    4. ACTIVE: owner_id IS NOT NULL AND last_accessed_at > (as_of - INTERVAL '6 months')
+    
+    Boundary condition:
+    An access timestamp exactly equal to the 6-month threshold evaluates to DORMANT.
+    """
+    if owner_id is None or str(owner_id).strip() == "":
+        return "ORPHANED"
+    if last_accessed_at is None:
+        return "UNCLASSIFIED"
+    
+    if as_of is None:
+        as_of = datetime.now(timezone.utc)
+    
+    ref_as_of = as_of
+    ref_last_accessed = last_accessed_at
+    if ref_as_of.tzinfo is None:
+        ref_as_of = ref_as_of.replace(tzinfo=timezone.utc)
+    if ref_last_accessed.tzinfo is None:
+        ref_last_accessed = ref_last_accessed.replace(tzinfo=timezone.utc)
+        
+    cutoff = subtract_calendar_months(ref_as_of, 6)
+    
+    if ref_last_accessed <= cutoff:
+        return "DORMANT"
+    else:
+        return "ACTIVE"
 
 
 class PowerBINormalizer:
@@ -551,6 +608,18 @@ class PowerBINormalizer:
                 source_metadata={"theme": report_def.theme, "pbir_version": report_def.pbir_version}
             ))
 
+            parsed_owner_id = None
+            if report_def.owner_id is not None:
+                if isinstance(report_def.owner_id, uuid.UUID):
+                    parsed_owner_id = report_def.owner_id
+                else:
+                    try:
+                        parsed_owner_id = uuid.UUID(str(report_def.owner_id))
+                    except (ValueError, TypeError):
+                        parsed_owner_id = make_deterministic_uuid(self.namespace, f"kpi_intel:principal:{report_def.owner_id}")
+
+            lifecycle_stat = classify_report_lifecycle(parsed_owner_id, report_def.last_accessed_at)
+
             canonical_rep = CanonicalReport(
                 report_id=report_obj_id,
                 object_id=report_obj_id,
@@ -562,7 +631,11 @@ class PowerBINormalizer:
                 },
                 page_count=len(report_def.pages),
                 visual_count=sum(len(p.visuals) for p in report_def.pages),
-                report_configuration=report_def.report_configuration
+                report_configuration=report_def.report_configuration,
+                owner_id=parsed_owner_id,
+                owner_name=report_def.owner_name,
+                last_accessed_at=report_def.last_accessed_at,
+                lifecycle_status=lifecycle_stat
             )
             reports.append(canonical_rep)
 
