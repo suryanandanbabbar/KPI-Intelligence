@@ -1,0 +1,164 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "version": "1.0.0",
+  "description": "Azure Cosmos DB for NoSQL Declarative Container Definitions for KPI Intelligence",
+  "database": {
+    "name": "kpi_intelligence",
+    "throughput": {
+      "mode": "autoscale",
+      "maxThroughput": 4000
+    }
+  },
+  "containers": [
+    {
+      "name": "metadata_catalog",
+      "partitionKey": {
+        "paths": ["/tenant_id"],
+        "kind": "Hash",
+        "version": 2
+      },
+      "indexingPolicy": {
+        "indexingMode": "consistent",
+        "automatic": true,
+        "includedPaths": [
+          {"path": "/doc_type/?"},
+          {"path": "/tenant_id/?"},
+          {"path": "/asset_id/?"},
+          {"path": "/asset_version_id/?"},
+          {"path": "/lifecycle_status/?"},
+          {"path": "/owner_id/?"},
+          {"path": "/last_accessed_at/?"}
+        ],
+        "excludedPaths": [
+          {"path": "/*"},
+          {"path": "/\"_etag\"/?"}
+        ],
+        "compositeIndexes": [
+          [
+            {"path": "/tenant_id", "order": "ascending"},
+            {"path": "/doc_type", "order": "ascending"}
+          ],
+          [
+            {"path": "/tenant_id", "order": "ascending"},
+            {"path": "/lifecycle_status", "order": "ascending"}
+          ]
+        ]
+      },
+      "defaultTtl": -1,
+      "uniqueKeyPolicy": {
+        "uniqueKeys": [
+          {"paths": ["/id"]}
+        ]
+      }
+    },
+    {
+      "name": "kpi_governance",
+      "partitionKey": {
+        "paths": ["/tenant_id"],
+        "kind": "Hash",
+        "version": 2
+      },
+      "indexingPolicy": {
+        "indexingMode": "consistent",
+        "automatic": true,
+        "includedPaths": [
+          {"path": "/doc_type/?"},
+          {"path": "/tenant_id/?"},
+          {"path": "/kpi_candidate_id/?"},
+          {"path": "/approval_status/?"},
+          {"path": "/standard_kpi_id/?"}
+        ],
+        "excludedPaths": [
+          {"path": "/*"},
+          {"path": "/\"_etag\"/?"}
+        ],
+        "compositeIndexes": [
+          [
+            {"path": "/tenant_id", "order": "ascending"},
+            {"path": "/doc_type", "order": "ascending"}
+          ]
+        ]
+      },
+      "defaultTtl": -1,
+      "uniqueKeyPolicy": {
+        "uniqueKeys": [
+          {"paths": ["/id"]}
+        ]
+      }
+    },
+    {
+      "name": "kpi_ontology",
+      "partitionKey": {
+        "paths": ["/business_domain"],
+        "kind": "Hash",
+        "version": 2
+      },
+      "indexingPolicy": {
+        "indexingMode": "consistent",
+        "automatic": true,
+        "includedPaths": [
+          {"path": "/doc_type/?"},
+          {"path": "/business_domain/?"},
+          {"path": "/standard_code/?"},
+          {"path": "/status/?"},
+          {"path": "/version_id/?"}
+        ],
+        "excludedPaths": [
+          {"path": "/*"},
+          {"path": "/\"_etag\"/?"}
+        ],
+        "compositeIndexes": [
+          [
+            {"path": "/business_domain", "order": "ascending"},
+            {"path": "/doc_type", "order": "ascending"}
+          ]
+        ]
+      },
+      "defaultTtl": -1,
+      "uniqueKeyPolicy": {
+        "uniqueKeys": [
+          {"paths": ["/id"]}
+        ]
+      }
+    },
+    {
+      "name": "operational_audit",
+      "partitionKey": {
+        "paths": ["/tenant_id"],
+        "kind": "Hash",
+        "version": 2
+      },
+      "indexingPolicy": {
+        "indexingMode": "consistent",
+        "automatic": true,
+        "includedPaths": [
+          {"path": "/doc_type/?"},
+          {"path": "/tenant_id/?"},
+          {"path": "/asset_version_id/?"},
+          {"path": "/kpi_mapping_id/?"},
+          {"path": "/created_at/?"}
+        ],
+        "excludedPaths": [
+          {"path": "/*"},
+          {"path": "/\"_etag\"/?"}
+        ],
+        "compositeIndexes": [
+          [
+            {"path": "/tenant_id", "order": "ascending"},
+            {"path": "/doc_type", "order": "ascending"}
+          ],
+          [
+            {"path": "/tenant_id", "order": "ascending"},
+            {"path": "/created_at", "order": "descending"}
+          ]
+        ]
+      },
+      "defaultTtl": 7776000,
+      "uniqueKeyPolicy": {
+        "uniqueKeys": [
+          {"paths": ["/id"]}
+        ]
+      }
+    }
+  ]
+}

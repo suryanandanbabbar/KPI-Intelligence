@@ -2,3 +2,12 @@ __pycache__/
 *.py[cod]
 *$py.class
 .DS_Store
+.venv/
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+local_data/
+.env
+.env.*
+!.env.example
+

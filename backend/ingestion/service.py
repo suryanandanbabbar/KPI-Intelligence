@@ -2,7 +2,8 @@
 KPI Intelligence — Ingestion Service.
 
 Main orchestrator coordinating platform extraction, canonical normalization,
-content hashing, idempotent version resolution, and database persistence.
+content hashing, idempotent version resolution, and repository persistence
+into Azure Cosmos DB for NoSQL (or local SQLite during testing).
 """
 
 import os
@@ -15,8 +16,12 @@ from backend.connectors.base import PlatformType, BaseConnector, Diagnostic, Dia
 from backend.connectors.registry import ConnectorRegistry
 from backend.connectors.powerbi.connector import PowerBIConnector
 from backend.connectors.powerbi.discovery import PbipDiscovery
-from backend.ingestion.persistence import CanonicalPersistenceService
 from backend.ingestion.models import CanonicalIngestionBundle
+from backend.ingestion.converter import BundleToDocumentsConverter
+from backend.repository.interfaces import IRepository
+from backend.repository.context import TenantContext
+from backend.repository.services import CatalogServiceRepository, AuditServiceRepository
+from backend.storage.factory import get_repository
 
 
 @dataclass
@@ -34,24 +39,31 @@ class IngestionSummary:
     stats: Dict[str, Any] = field(default_factory=dict)
     diagnostics: List[Diagnostic] = field(default_factory=list)
     sql_script: Optional[str] = None
-    is_live: bool = False
+    is_live: bool = True
     status: str = "SUCCESSFUL"
 
 
 class IngestionService:
     """End-to-end ingestion pipeline orchestrator."""
 
-    def __init__(self, tenant_id: uuid.UUID, parser_version: str = "1.0.0"):
+    def __init__(
+        self,
+        tenant_id: uuid.UUID,
+        parser_version: str = "1.0.0",
+        repository: Optional[IRepository] = None,
+    ):
         self.tenant_id = tenant_id
         self.parser_version = parser_version
+        self.repo = repository or get_repository()
+        self.catalog_repo = CatalogServiceRepository(self.repo)
+        self.audit_repo = AuditServiceRepository(self.repo)
 
     def ingest_project(
         self,
         source_path: str,
         platform: PlatformType = PlatformType.POWER_BI,
         version_number: int = 1,
-        connection: Optional[Any] = None,
-        generate_sql_only: bool = False
+        generate_sql_only: bool = False,
     ) -> IngestionSummary:
         """
         Executes end-to-end ingestion of a BI project.
@@ -79,10 +91,43 @@ class IngestionService:
             version_number=version_number
         )
 
-        # 4. Persistence
-        persister = CanonicalPersistenceService(tenant_id=self.tenant_id)
-        sql_script = persister.generate_transactional_sql(bundle)
-        persist_stats = persister.persist(bundle, connection=connection if not generate_sql_only else None)
+        # 4. Persistence via Canonical Repository
+        context = TenantContext(tenant_id=str(self.tenant_id))
+        docs = BundleToDocumentsConverter.convert(bundle)
+
+        if not generate_sql_only:
+            # Save Asset & Version
+            for a in docs["assets"]:
+                self.catalog_repo.save_asset(a, context)
+            for v in docs["asset_versions"]:
+                self.catalog_repo.save_asset_version(v, context)
+
+            # Save Reports
+            for r in docs["reports"]:
+                self.catalog_repo.save_report(r, context)
+
+            # Save Models
+            for m in docs["semantic_models"]:
+                self.catalog_repo.save_semantic_model(m, context)
+
+            # Save Lineage
+            for e in docs["lineage_edges"]:
+                self.catalog_repo.save_lineage_edge(e, context)
+
+            # Save Runs & Errors
+            for run in docs["parser_runs"]:
+                self.audit_repo.log_parser_run(run, context)
+            for err in docs["extraction_errors"]:
+                self.audit_repo.log_error(err, context)
+
+        # Optional legacy SQL script generation for migration/debug
+        sql_script = None
+        try:
+            from backend.ingestion.persistence import CanonicalPersistenceService
+            persister = CanonicalPersistenceService(tenant_id=self.tenant_id)
+            sql_script = persister.generate_transactional_sql(bundle)
+        except Exception:
+            pass
 
         all_stats = {
             "source_artifacts": len(bundle.artifacts),
@@ -100,8 +145,8 @@ class IngestionService:
             "model_partitions": len(bundle.partitions),
             "named_expressions": len(bundle.named_expressions),
             "metadata_lineage_edges": len(bundle.lineage_edges),
-            "sql_statement_count": persist_stats["sql_statement_count"],
-            "raw_stats": extraction.run_stats
+            "raw_stats": extraction.run_stats,
+            "cosmos_documents_persisted": sum(len(v) for v in docs.values()) if not generate_sql_only else 0,
         }
 
         return IngestionSummary(
@@ -118,6 +163,6 @@ class IngestionService:
             stats=all_stats,
             diagnostics=extraction.diagnostics,
             sql_script=sql_script,
-            is_live=persist_stats.get("executed_live", False),
-            status="SUCCESSFUL" if persist_stats.get("errors_count", 0) == 0 else "PARTIAL"
+            is_live=not generate_sql_only,
+            status="SUCCESSFUL",
         )

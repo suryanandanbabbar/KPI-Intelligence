@@ -3,8 +3,8 @@
 KPI Intelligence — Power BI PBIP Metadata Ingestion CLI.
 
 CLI tool for extracting metadata from Power BI Projects (.pbip),
-normalizing into the 61-table canonical data model, and persisting
-to PostgreSQL with transaction-local tenant context.
+normalizing into canonical data model documents, and persisting
+to Azure Cosmos DB for NoSQL (or local SQLite during development/test).
 """
 
 import os
@@ -20,11 +20,13 @@ if REPO_ROOT not in sys.path:
 
 from backend.connectors.base import PlatformType
 from backend.ingestion.service import IngestionService
+from backend.storage.config import StorageConfig, StorageBackendType
+from backend.storage.factory import get_repository
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Ingest Power BI PBIP metadata into KPI Intelligence canonical model."
+        description="Ingest Power BI PBIP metadata into KPI Intelligence canonical model (Cosmos DB / SQLite)."
     )
     parser.add_argument(
         "--source",
@@ -34,12 +36,13 @@ def main():
     parser.add_argument(
         "--tenant-id",
         default="11111111-1111-1111-1111-111111111111",
-        help="Tenant UUID for row-level security and isolation"
+        help="Tenant UUID for isolation and partition routing"
     )
     parser.add_argument(
-        "--db-url",
-        default=os.environ.get("DATABASE_URL"),
-        help="PostgreSQL connection string (or DATABASE_URL env var)"
+        "--backend",
+        choices=["sqlite", "cosmos"],
+        default=None,
+        help="Storage backend override (default: KPI_STORAGE_BACKEND env var or sqlite in dev)"
     )
     parser.add_argument(
         "--version-number",
@@ -49,7 +52,7 @@ def main():
     )
     parser.add_argument(
         "--output-sql",
-        help="Optional path to output the compiled transactional SQL script"
+        help="Optional path to output the compiled transactional SQL script (legacy/debug)"
     )
     parser.add_argument(
         "--output-json",
@@ -58,7 +61,7 @@ def main():
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Perform parsing and normalization without executing live database queries"
+        help="Perform parsing and normalization without persisting documents"
     )
 
     args = parser.parse_args()
@@ -69,39 +72,43 @@ def main():
         print(f"Error: Invalid tenant UUID: {args.tenant_id}", file=sys.stderr)
         sys.exit(1)
 
+    if args.backend:
+        os.environ["KPI_STORAGE_BACKEND"] = args.backend
+
+    try:
+        cfg = StorageConfig.from_env()
+    except Exception as e:
+        print(f"Configuration error: {e}", file=sys.stderr)
+        sys.exit(1)
+
     print("======================================================================")
     print("KPI INTELLIGENCE — POWER BI PBIP METADATA INGESTION")
-    print(f"Source:        {args.source}")
-    print(f"Tenant ID:     {tenant_uuid}")
-    print(f"Version:       #{args.version_number}")
-    print(f"Target DB:     {args.db_url or 'None (Declarative SQL mode)'}")
+    print(f"Source:          {args.source}")
+    print(f"Tenant ID:       {tenant_uuid}")
+    print(f"Version:         #{args.version_number}")
+    print(f"Storage Backend: {cfg.backend.value.upper()} (Env: {cfg.environment.value})")
+    print(f"Dry Run:         {'YES' if args.dry_run else 'NO'}")
     print("======================================================================\n")
 
-    conn = None
-    if args.db_url and not args.dry_run:
+    repo = None
+    if not args.dry_run:
         try:
-            import psycopg2
-            conn = psycopg2.connect(args.db_url)
-            conn.autocommit = False
-            print(f"[LIVE DB] Connected to PostgreSQL: {args.db_url}\n")
+            repo = get_repository(cfg)
         except Exception as e:
-            print(f"[WARN] Could not connect to database ({e}). Operating in declarative mode.\n")
-            conn = None
+            print(f"Error initializing repository backend: {e}", file=sys.stderr)
+            sys.exit(1)
 
-    service = IngestionService(tenant_id=tenant_uuid)
+    service = IngestionService(tenant_id=tenant_uuid, repository=repo)
     
     try:
         summary = service.ingest_project(
             source_path=args.source,
             platform=PlatformType.POWER_BI,
             version_number=args.version_number,
-            connection=conn,
-            generate_sql_only=(conn is None or args.dry_run)
+            generate_sql_only=args.dry_run
         )
     except Exception as ex:
         print(f"Ingestion failed: {ex}", file=sys.stderr)
-        if conn:
-            conn.close()
         sys.exit(1)
 
     # Save SQL output if requested
@@ -140,33 +147,26 @@ def main():
         print(f"Exported metadata summary to: {args.output_json}")
 
     print("\n--- INGESTION SUMMARY ---")
-    print(f"Status:                 {summary.status}")
-    print(f"Asset Name:             {summary.asset_name}")
-    print(f"Asset ID:               {summary.asset_id}")
-    print(f"Version ID:             {summary.asset_version_id}")
-    print(f"Content Hash:           {summary.content_hash}")
-    print(f"Source Artifacts:       {summary.stats.get('source_artifacts', 0)}")
-    print(f"Analytical Objects:     {summary.stats.get('analytical_objects', 0)}")
-    print(f"Semantic Models:        {summary.stats.get('semantic_models', 0)}")
-    print(f"Data Tables:            {summary.stats.get('data_tables', 0)}")
-    print(f"Data Columns:           {summary.stats.get('data_columns', 0)}")
-    print(f"Calculations:           {summary.stats.get('calculations', 0)}")
-    print(f"Relationships:          {summary.stats.get('relationships', 0)}")
-    print(f"Partitions:             {summary.stats.get('model_partitions', 0)}")
-    print(f"Named Expressions:      {summary.stats.get('named_expressions', 0)}")
-    print(f"Reports:                {summary.stats.get('reports', 0)}")
-    print(f"Report Pages:           {summary.stats.get('report_pages', 0)}")
-    print(f"Visuals:                {summary.stats.get('visuals', 0)}")
-    print(f"Visual Bindings:        {summary.stats.get('visual_bindings', 0)}")
-    print(f"Bookmarks:              {summary.stats.get('bookmarks', 0)}")
-    print(f"Metadata Lineage Edges: {summary.stats.get('metadata_lineage_edges', 0)}")
-    print(f"SQL Statements:         {summary.stats.get('sql_statement_count', 0)}")
-    print(f"Live Execution:         {'YES' if summary.is_live else 'NO (Declarative SQL validated)'}")
+    print(f"Status:                     {summary.status}")
+    print(f"Asset Name:                 {summary.asset_name}")
+    print(f"Asset ID:                   {summary.asset_id}")
+    print(f"Version ID:                 {summary.asset_version_id}")
+    print(f"Content Hash:               {summary.content_hash}")
+    print(f"Cosmos Documents Persisted: {summary.stats.get('cosmos_documents_persisted', 0)}")
+    print(f"Source Artifacts:           {summary.stats.get('source_artifacts', 0)}")
+    print(f"Reports:                    {summary.stats.get('reports', 0)}")
+    print(f"Report Pages:               {summary.stats.get('report_pages', 0)}")
+    print(f"Visuals:                    {summary.stats.get('visuals', 0)}")
+    print(f"Semantic Models:            {summary.stats.get('semantic_models', 0)}")
+    print(f"Data Tables:                {summary.stats.get('data_tables', 0)}")
+    print(f"Data Columns:               {summary.stats.get('data_columns', 0)}")
+    print(f"Calculations (Measures):    {summary.stats.get('calculations', 0)}")
+    print(f"Relationships:              {summary.stats.get('relationships', 0)}")
+    print(f"Lineage Edges:              {summary.stats.get('metadata_lineage_edges', 0)}")
+    print(f"Backend Target:             {cfg.backend.value.upper()}")
     print("======================================================================\n")
-
-    if conn:
-        conn.close()
 
 
 if __name__ == "__main__":
     main()
+
