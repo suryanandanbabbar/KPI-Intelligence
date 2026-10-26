@@ -52,50 +52,137 @@ class TestDatabaseIntegration(unittest.TestCase):
         if not self.has_live_db:
             self.skipTest("Live PostgreSQL database connection not available (set DATABASE_URL to enable)")
 
-    def test_01_tenant_isolation_and_lifecycle(self):
-        """Verify tenant context lifecycle: sequential requests, rollback isolation, and fail-closed missing context."""
+    def test_01_tenant_isolation_in_transaction(self):
+        """1. Set Tenant A inside a transaction and verify that tenant-scoped queries use Tenant A."""
         cur = self.conn.cursor()
         try:
-            # 1. Missing tenant context -> fail-closed (0 rows returned)
-            cur.execute("SELECT kpi_intel.clear_current_tenant_id(true);")
-            cur.execute("SELECT asset_name FROM kpi_intel.assets;")
-            self.assertEqual(len(cur.fetchall()), 0, "Missing tenant context must fail closed and return 0 rows")
-
-            # 2. Tenant A request on connection
-            cur.execute("SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid, true);")
+            cur.execute("SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid);")
             cur.execute("""
                 INSERT INTO kpi_intel.assets (asset_id, tenant_id, platform, asset_type, asset_name)
                 VALUES ('a1111111-1111-1111-1111-111111111111', '11111111-1111-1111-1111-111111111111', 'POWER_BI', 'REPORT', 'Tenant A Asset');
             """)
-            
-            # 3. Sequential request for Tenant B on same connection
-            cur.execute("SELECT kpi_intel.set_current_tenant_id('22222222-2222-2222-2222-222222222222'::uuid, true);")
+            cur.execute("SELECT asset_name FROM kpi_intel.assets;")
+            names = [r[0] for r in cur.fetchall()]
+            self.assertIn("Tenant A Asset", names)
+        finally:
+            self.conn.rollback()
+
+    def test_02_tenant_setting_cleared_on_commit(self):
+        """2. Commit the transaction and verify that the tenant setting does not persist into the next transaction."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid);")
+        self.conn.commit()
+
+        # In a new transaction on the same connection, verify tenant context is automatically cleared
+        cur = self.conn.cursor()
+        cur.execute("SELECT kpi_intel.current_tenant_id();")
+        res = cur.fetchone()[0]
+        self.assertIsNone(res, "Tenant setting must not persist into the next transaction after COMMIT")
+
+    def test_03_tenant_setting_cleared_on_rollback(self):
+        """3. Roll back a transaction after setting Tenant A and verify that the setting does not leak."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid);")
+        self.conn.rollback()
+
+        # In a new transaction on the same connection, verify tenant context is reset
+        cur = self.conn.cursor()
+        cur.execute("SELECT kpi_intel.current_tenant_id();")
+        res = cur.fetchone()[0]
+        self.assertIsNone(res, "Tenant setting must not leak after ROLLBACK")
+
+    def test_04_sequential_tenants_on_same_connection(self):
+        """4. Reuse the same database connection for Tenant A and then Tenant B, verifying each transaction uses only its own context."""
+        cur = self.conn.cursor()
+        try:
+            # Transaction 1: Tenant A
+            cur.execute("SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid);")
+            cur.execute("""
+                INSERT INTO kpi_intel.assets (asset_id, tenant_id, platform, asset_type, asset_name)
+                VALUES ('a1111111-1111-1111-1111-111111111111', '11111111-1111-1111-1111-111111111111', 'POWER_BI', 'REPORT', 'Tenant A Asset');
+            """)
+            self.conn.commit()
+
+            # Transaction 2 on same connection: Tenant B
+            cur = self.conn.cursor()
+            cur.execute("SELECT kpi_intel.set_current_tenant_id('22222222-2222-2222-2222-222222222222'::uuid);")
             cur.execute("""
                 INSERT INTO kpi_intel.assets (asset_id, tenant_id, platform, asset_type, asset_name)
                 VALUES ('b2222222-2222-2222-2222-222222222222', '22222222-2222-2222-2222-222222222222', 'TABLEAU', 'WORKBOOK', 'Tenant B Asset');
             """)
-
-            # Query assets as Tenant B: Must see only Tenant B Asset
+            # Query as Tenant B: Must see only Tenant B Asset, never Tenant A Asset
             cur.execute("SELECT asset_name FROM kpi_intel.assets;")
             names = [r[0] for r in cur.fetchall()]
             self.assertIn("Tenant B Asset", names)
             self.assertNotIn("Tenant A Asset", names)
+            self.conn.commit()
 
-            # 4. Rollback resets transaction-local tenant context
-            self.conn.rollback()
+            # Transaction 3 on same connection: Tenant A again
             cur = self.conn.cursor()
-            cur.execute("SELECT kpi_intel.current_tenant_id();")
-            res = cur.fetchone()[0]
-            self.assertIsNone(res, "Transaction rollback must reset transaction-local tenant context to NULL")
+            cur.execute("SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid);")
+            cur.execute("SELECT asset_name FROM kpi_intel.assets;")
+            names = [r[0] for r in cur.fetchall()]
+            self.assertIn("Tenant A Asset", names)
+            self.assertNotIn("Tenant B Asset", names)
+            self.conn.commit()
         finally:
             self.conn.rollback()
 
-    def test_02_cross_tenant_fk_rejection(self):
+    def test_05_missing_tenant_context_fails_closed(self):
+        """5. Execute tenant-scoped queries without a tenant context and verify that they fail closed."""
+        cur = self.conn.cursor()
+        try:
+            # Clear any context explicitly
+            cur.execute("SELECT kpi_intel.clear_current_tenant_id();")
+            cur.execute("SELECT asset_name FROM kpi_intel.assets;")
+            rows = cur.fetchall()
+            self.assertEqual(len(rows), 0, "Missing tenant context must fail closed and return 0 rows under RLS")
+        finally:
+            self.conn.rollback()
+
+    def test_06_ordinary_role_cannot_set_session_state(self):
+        """6. Verify that the ordinary application role cannot use the setter to establish session-level state."""
+        cur = self.conn.cursor()
+        try:
+            # Calling set_current_tenant_id sets transaction-local state
+            cur.execute("SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid);")
+            cur.execute("SELECT current_setting('kpi_intel.current_tenant_id', true);")
+            self.assertEqual(cur.fetchone()[0], '11111111-1111-1111-1111-111111111111')
+            self.conn.commit()
+
+            # Verify no session-level state survived the commit
+            cur = self.conn.cursor()
+            cur.execute("SELECT current_setting('kpi_intel.current_tenant_id', true);")
+            setting_after = cur.fetchone()[0]
+            self.assertTrue(setting_after is None or setting_after == '', "Ordinary setter must not establish session-level state")
+        finally:
+            self.conn.rollback()
+
+    def test_07_obsolete_function_overload_rejection(self):
+        """7. Verify that an obsolete function overload cannot be called to bypass the new behavior."""
+        cur = self.conn.cursor()
+        try:
+            # Calling 2-parameter setter set_current_tenant_id(UUID, BOOLEAN) must fail as undefined function
+            with self.assertRaises(Exception) as ctx:
+                cur.execute("SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid, false);")
+            self.assertTrue("does not exist" in str(ctx.exception) or "42883" in str(getattr(ctx.exception, 'pgcode', '')))
+            self.conn.rollback()
+
+            cur = self.conn.cursor()
+            # Calling 1-parameter clearer clear_current_tenant_id(BOOLEAN) must fail as undefined function
+            with self.assertRaises(Exception) as ctx:
+                cur.execute("SELECT kpi_intel.clear_current_tenant_id(false);")
+            self.assertTrue("does not exist" in str(ctx.exception) or "42883" in str(getattr(ctx.exception, 'pgcode', '')))
+            self.conn.rollback()
+        finally:
+            self.conn.rollback()
+
+    def test_08_cross_tenant_fk_rejection(self):
         """Verify that composite foreign key rejects cross-tenant association."""
         cur = self.conn.cursor()
         try:
             # Create Tenant A Asset
-            cur.execute("SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid, true);")
+            cur.execute("SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid);")
             cur.execute("""
                 INSERT INTO kpi_intel.assets (asset_id, tenant_id, platform, asset_type, asset_name)
                 VALUES ('a1111111-1111-1111-1111-111111111111', '11111111-1111-1111-1111-111111111111', 'POWER_BI', 'REPORT', 'Tenant A Asset');
@@ -109,11 +196,11 @@ class TestDatabaseIntegration(unittest.TestCase):
         finally:
             self.conn.rollback()
 
-    def test_03_audit_immutability(self):
+    def test_09_audit_immutability(self):
         """Verify that UPDATE and DELETE are rejected on audit tables with SQLSTATE 42501."""
         cur = self.conn.cursor()
         try:
-            cur.execute("SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid, true);")
+            cur.execute("SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid);")
             cur.execute("""
                 INSERT INTO kpi_intel.mapping_audit_events (mapping_audit_event_id, target_kpi_mapping_id, tenant_id, actor_user_id, event_type)
                 VALUES ('e1111111-1111-1111-1111-111111111111', 'm1111111-1111-1111-1111-111111111111', '11111111-1111-1111-1111-111111111111', 'u1111111-1111-1111-1111-111111111111', 'PROPOSED');
@@ -135,11 +222,11 @@ class TestDatabaseIntegration(unittest.TestCase):
         finally:
             self.conn.rollback()
 
-    def test_04_human_approval_protection(self):
+    def test_10_human_approval_protection(self):
         """Verify that automated jobs cannot overwrite human-approved mappings, and only human actors can supersede."""
         cur = self.conn.cursor()
         try:
-            cur.execute("SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid, true);")
+            cur.execute("SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid);")
             # Setup prerequisites and approved mapping
             # Attempt update with decision_source = 'LLM' on approved mapping -> Rejected
             # Attempt modifying kpi_candidate_id -> Rejected
@@ -147,11 +234,11 @@ class TestDatabaseIntegration(unittest.TestCase):
         finally:
             self.conn.rollback()
 
-    def test_05_override_cycle_prevention(self):
+    def test_11_override_cycle_prevention(self):
         """Verify that cyclic override supersession is rejected."""
         cur = self.conn.cursor()
         try:
-            cur.execute("SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid, true);")
+            cur.execute("SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid);")
             with self.assertRaises(Exception):
                 cur.execute("""
                     INSERT INTO kpi_intel.mapping_overrides (override_id, kpi_mapping_id, override_type, override_justification, normalised_justification, justification_hash, created_by_user_id, supersedes_override_id)
@@ -160,11 +247,11 @@ class TestDatabaseIntegration(unittest.TestCase):
         finally:
             self.conn.rollback()
 
-    def test_06_composite_fk_column_specific_set_null(self):
+    def test_12_composite_fk_column_specific_set_null(self):
         """Verify that deleting referenced candidate or ontology entry only nulls nullable columns."""
         cur = self.conn.cursor()
         try:
-            cur.execute("SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid, true);")
+            cur.execute("SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid);")
             # Tested via column-specific ON DELETE SET NULL
         finally:
             self.conn.rollback()
@@ -179,10 +266,38 @@ class TestStaticIntegrityFallback(unittest.TestCase):
         with open(cls.sql_path, "r", encoding="utf-8") as f:
             cls.sql = f.read()
 
-    def test_tenant_context_transaction_local_default(self):
-        """Verify set_current_tenant_id defaults to transaction-local (is_local = true)."""
-        self.assertIn("p_is_local BOOLEAN DEFAULT true", self.sql)
-        self.assertIn("clear_current_tenant_id(p_is_local BOOLEAN DEFAULT true)", self.sql)
+    def test_ordinary_setter_no_p_is_local(self):
+        """Verify ordinary setter accepts only (p_tenant_id UUID) with no p_is_local option."""
+        self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.set_current_tenant_id(p_tenant_id UUID)", self.sql)
+        self.assertNotIn("set_current_tenant_id(p_tenant_id UUID, p_is_local", self.sql)
+        self.assertNotIn("p_is_local BOOLEAN", self.sql)
+
+    def test_setter_explicitly_transaction_local(self):
+        """Verify setter explicitly uses transaction-local configuration (true)."""
+        self.assertIn("PERFORM set_config('kpi_intel.current_tenant_id', p_tenant_id::TEXT, true);", self.sql)
+        self.assertIn("PERFORM set_config('kpi_intel.current_tenant_id', '', true);", self.sql)
+
+    def test_ordinary_clearer_no_session_level(self):
+        """Verify clearer has 0 arguments and explicitly uses transaction-local configuration (true)."""
+        self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.clear_current_tenant_id()", self.sql)
+        self.assertNotIn("clear_current_tenant_id(p_is_local", self.sql)
+
+    def test_obsolete_overloads_dropped(self):
+        """Verify obsolete callable overloads with BOOLEAN are explicitly dropped."""
+        self.assertIn("DROP FUNCTION IF EXISTS kpi_intel.set_current_tenant_id(UUID, BOOLEAN);", self.sql)
+        self.assertIn("DROP FUNCTION IF EXISTS kpi_intel.clear_current_tenant_id(BOOLEAN);", self.sql)
+
+    def test_rls_tenant_resolution_fails_closed(self):
+        """Verify current_tenant_id fails closed to NULL when setting is missing or empty."""
+        self.assertIn("RETURN NULLIF(current_setting('kpi_intel.current_tenant_id', true), '')::UUID;", self.sql)
+
+    def test_revoke_public_function_execution(self):
+        """Verify EXECUTE on tenant functions is revoked from PUBLIC and granted only to application roles."""
+        self.assertIn("REVOKE ALL ON FUNCTION kpi_intel.current_tenant_id() FROM PUBLIC;", self.sql)
+        self.assertIn("REVOKE ALL ON FUNCTION kpi_intel.set_current_tenant_id(UUID) FROM PUBLIC;", self.sql)
+        self.assertIn("REVOKE ALL ON FUNCTION kpi_intel.clear_current_tenant_id() FROM PUBLIC;", self.sql)
+        self.assertIn("GRANT EXECUTE ON FUNCTION kpi_intel.set_current_tenant_id(UUID) TO kpi_app_user;", self.sql)
+        self.assertIn("GRANT EXECUTE ON FUNCTION kpi_intel.clear_current_tenant_id() TO kpi_app_user;", self.sql)
 
     def test_full_61_table_rls_coverage(self):
         """Verify all 61 tables have ROW LEVEL SECURITY enabled."""

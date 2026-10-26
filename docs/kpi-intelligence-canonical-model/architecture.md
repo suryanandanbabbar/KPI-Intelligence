@@ -364,7 +364,7 @@ The platform enforces a defense-in-depth tenant isolation model across synchroni
                      │
                      ▼
   [ Transaction Session Resolution ]
-     set_current_tenant_id(UUID, p_is_local => true)
+     set_current_tenant_id(UUID)
      (Scopes strictly to current transaction block)
                      │
          ┌───────────┴───────────┐
@@ -374,22 +374,25 @@ The platform enforces a defense-in-depth tenant isolation model across synchroni
   scoped tables (direct + child).  prevent cross-tenant parent-child links.
 ```
 
-1. **Transaction-Local Session Scope & Lifecycle**:
-   - `kpi_intel.set_current_tenant_id(p_tenant_id UUID, p_is_local BOOLEAN DEFAULT true)` executes `set_config('kpi_intel.current_tenant_id', p_tenant_id::TEXT, p_is_local)`.
-   - When `p_is_local = true`, the configuration setting is strictly local to the active transaction. Upon `COMMIT` or `ROLLBACK`, PostgreSQL automatically purges the variable.
-   - Connection pools (e.g. PgBouncer, HikariCP) in transaction-pooling mode safely reuse connections without risking cross-tenant state leakage between sequential requests.
-   - For explicit cleanup, `kpi_intel.clear_current_tenant_id()` is provided.
-   - If no tenant context is set or context is malformed, `kpi_intel.current_tenant_id()` fails closed by raising an exception, preventing unintended global or cross-tenant data exposure.
+1. **Mandatory Transaction-Local Session Scope & Lifecycle**:
+   - `kpi_intel.set_current_tenant_id(p_tenant_id UUID)` executes `set_config('kpi_intel.current_tenant_id', p_tenant_id::TEXT, true)`.
+   - The application-facing API has no `p_is_local` argument: transaction-local configuration (`is_local = true`) is strictly mandatory, making session-level state impossible through ordinary application operations.
+   - Upon `COMMIT` or `ROLLBACK`, PostgreSQL automatically purges the variable. Connection pools (e.g. PgBouncer, HikariCP) in transaction-pooling mode safely reuse connections without risking cross-tenant state leakage between sequential requests.
+   - For explicit cleanup within a transaction, `kpi_intel.clear_current_tenant_id()` is provided (`set_config(..., '', true)`).
+   - Obsolete overloads with `BOOLEAN` arguments (`set_current_tenant_id(UUID, BOOLEAN)`, `clear_current_tenant_id(BOOLEAN)`) are explicitly dropped.
+   - If no tenant context is set or context is malformed, `kpi_intel.current_tenant_id()` returns `NULL`, causing tenant-scoped RLS policies to fail closed.
 
 2. **Authorization Context vs Authentication Trust Boundary**:
    - Setting a session configuration (`current_setting`) is an *authorization context mechanism*, not an authentication mechanism.
    - The application backend serves as the authoritative trust boundary: it authenticates user identity (via JWT, OAuth2, or mTLS), extracts the verified `tenant_id`, and sets the context before executing queries.
    - Untrusted clients must never be granted direct database access or privileges to invoke `set_current_tenant_id` with arbitrary tenant IDs.
 
-3. **Application Roles & Privilege Separation**:
+3. **Application Roles & Least Privilege Enforcement**:
+   - Function execution privileges on `current_tenant_id()`, `set_current_tenant_id(UUID)`, and `clear_current_tenant_id()` are explicitly revoked from `PUBLIC` (`REVOKE ALL ON FUNCTION ... FROM PUBLIC`).
    - Dedicated application roles enforce the principle of least privilege:
-     * `kpi_app_user`: Standard runtime application role. Granted `USAGE` on schema `kpi_intel`, `SELECT, INSERT, UPDATE, DELETE` on operational tables, but `UPDATE`, `DELETE`, and `TRUNCATE` are explicitly **revoked** on audit ledgers (`mapping_audit_events`, `ontology_change_events`).
-     * `kpi_readonly`: Read-only reporting and audit role with `SELECT` permissions across all tables.
+     * `kpi_app_user`: Standard runtime application role. Granted `USAGE` on schema `kpi_intel`, `SELECT, INSERT, UPDATE, DELETE` on operational tables, execution on `set_current_tenant_id(UUID)` and `clear_current_tenant_id()`, but `UPDATE`, `DELETE`, and `TRUNCATE` are explicitly **revoked** on audit ledgers (`mapping_audit_events`, `ontology_change_events`).
+     * `kpi_readonly`: Read-only reporting and audit role with `SELECT` permissions across all tables and `EXECUTE` on `current_tenant_id()`.
+   - All tenant functions specify `SECURITY INVOKER SET search_path = pg_catalog, kpi_intel` to guard against search_path hijacking.
 
 4. **Complete 61-Table Row Level Security (RLS) Matrix**:
    - `FORCE ROW LEVEL SECURITY` is enabled across all 55 tenant-scoped tables:

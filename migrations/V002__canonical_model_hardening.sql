@@ -27,6 +27,12 @@ SET search_path = kpi_intel, public;
 -- ----------------------------------------------------------------------------
 -- 1. TENANT CONTEXT HELPER FUNCTIONS
 -- ----------------------------------------------------------------------------
+-- Explicitly drop obsolete signatures to prevent session-level bypass overloads
+DROP FUNCTION IF EXISTS kpi_intel.set_current_tenant_id(UUID, BOOLEAN);
+DROP FUNCTION IF EXISTS kpi_intel.set_current_tenant_id(UUID);
+DROP FUNCTION IF EXISTS kpi_intel.clear_current_tenant_id(BOOLEAN);
+DROP FUNCTION IF EXISTS kpi_intel.clear_current_tenant_id();
+
 CREATE OR REPLACE FUNCTION kpi_intel.current_tenant_id()
 RETURNS UUID AS $$
 BEGIN
@@ -34,25 +40,27 @@ BEGIN
 EXCEPTION
     WHEN OTHERS THEN RETURN NULL;
 END;
-$$ LANGUAGE plpgsql STABLE;
+$$ LANGUAGE plpgsql STABLE SECURITY INVOKER SET search_path = pg_catalog, kpi_intel;
 
-CREATE OR REPLACE FUNCTION kpi_intel.set_current_tenant_id(p_tenant_id UUID, p_is_local BOOLEAN DEFAULT true)
+CREATE OR REPLACE FUNCTION kpi_intel.set_current_tenant_id(p_tenant_id UUID)
 RETURNS VOID AS $$
 BEGIN
+    -- Mandatory transaction-local configuration: is_local is strictly true
     IF p_tenant_id IS NULL THEN
-        PERFORM set_config('kpi_intel.current_tenant_id', '', p_is_local);
+        PERFORM set_config('kpi_intel.current_tenant_id', '', true);
     ELSE
-        PERFORM set_config('kpi_intel.current_tenant_id', p_tenant_id::TEXT, p_is_local);
+        PERFORM set_config('kpi_intel.current_tenant_id', p_tenant_id::TEXT, true);
     END IF;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog, kpi_intel;
 
-CREATE OR REPLACE FUNCTION kpi_intel.clear_current_tenant_id(p_is_local BOOLEAN DEFAULT true)
+CREATE OR REPLACE FUNCTION kpi_intel.clear_current_tenant_id()
 RETURNS VOID AS $$
 BEGIN
-    PERFORM set_config('kpi_intel.current_tenant_id', '', p_is_local);
+    -- Mandatory transaction-local clear: is_local is strictly true
+    PERFORM set_config('kpi_intel.current_tenant_id', '', true);
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql SECURITY INVOKER SET search_path = pg_catalog, kpi_intel;
 
 -- ----------------------------------------------------------------------------
 -- 2. TENANT OWNERSHIP COLUMN BACKFILLS & COMPOSITE CONSTRAINTS
@@ -998,8 +1006,13 @@ GRANT SELECT, INSERT ON kpi_intel.mapping_audit_events, kpi_intel.ontology_chang
 
 GRANT SELECT ON ALL TABLES IN SCHEMA kpi_intel TO kpi_readonly;
 
+-- Revoke execution from PUBLIC to enforce least-privilege role boundaries
+REVOKE ALL ON FUNCTION kpi_intel.current_tenant_id() FROM PUBLIC;
+REVOKE ALL ON FUNCTION kpi_intel.set_current_tenant_id(UUID) FROM PUBLIC;
+REVOKE ALL ON FUNCTION kpi_intel.clear_current_tenant_id() FROM PUBLIC;
+
 GRANT EXECUTE ON FUNCTION kpi_intel.current_tenant_id() TO kpi_app_user, kpi_readonly;
-GRANT EXECUTE ON FUNCTION kpi_intel.set_current_tenant_id(UUID, BOOLEAN) TO kpi_app_user;
-GRANT EXECUTE ON FUNCTION kpi_intel.clear_current_tenant_id(BOOLEAN) TO kpi_app_user;
+GRANT EXECUTE ON FUNCTION kpi_intel.set_current_tenant_id(UUID) TO kpi_app_user;
+GRANT EXECUTE ON FUNCTION kpi_intel.clear_current_tenant_id() TO kpi_app_user;
 
 COMMIT;

@@ -119,13 +119,13 @@ Execute the complete automated test suite locally or in CI/CD:
 # 1. Full schema completeness and cross-file synchronization validator (36 checks)
 python3 scripts/validate_canonical_model.py
 
-# 2. Schema integrity unit test suite (11 test cases)
+# 2. Schema integrity unit test suite (12 test cases)
 python3 scripts/test_schema_integrity.py
 
 # 3. KPI Bank JSON parser and diff engine test suite (19 test cases)
 python3 scripts/test_kpi_bank_parser.py
 
-# 4. Live database integration test suite (6 live tests, 7 static fallback tests)
+# 4. Live database integration test suite (12 live tests, 12 static fallback tests)
 python3 scripts/test_db_integration.py
 ```
 
@@ -133,7 +133,7 @@ The verification suite validates:
 1. All 61 tables exist in the DDL without additions or renames.
 2. All 632 mandatory columns, types, defaults, and nullable flags exist.
 3. Foreign key creation order and target resolution (108 references checked, including composite FKs with column-specific `ON DELETE SET NULL (col)`).
-4. Transaction-local Row Level Security (`FORCE RLS`) across all 55 tenant-scoped tables and helper functions (`set_current_tenant_id` with `p_is_local`, `clear_current_tenant_id`).
+4. Mandatory transaction-local Row Level Security (`FORCE RLS`) across all 55 tenant-scoped tables and helper functions (`set_current_tenant_id(UUID)`, `clear_current_tenant_id()`).
 5. Immutability triggers on audit tables (`ON DELETE RESTRICT` and `prevent_audit_mutation()` with `ERRCODE = '42501'`).
 6. Hardened human approval transition state machine (`protect_human_approval()`).
 7. All 6 business domains are seeded.

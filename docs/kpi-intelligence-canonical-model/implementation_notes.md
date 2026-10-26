@@ -84,14 +84,20 @@ This document provides architectural guidance, operational protocols, database i
 ### 2.1 Tenant Boundary Architecture & Trust Model
 The canonical model implements defense-in-depth tenant isolation across four distinct layers:
 
-1. **Transaction-Local Context Lifecycle & Pool Reuse**:
-   - **Transaction-Local Setting (`is_local = true`)**: `kpi_intel.set_current_tenant_id(p_tenant_id UUID, p_is_local BOOLEAN DEFAULT true)` sets the context scoped strictly to the current database transaction (`set_config('kpi_intel.current_tenant_id', ..., true)`).
-   - **Connection Pool Safety (PgBouncer, HikariCP)**: Upon `COMMIT` or `ROLLBACK`, PostgreSQL automatically clears transaction-local configuration parameters. When a connection is returned to the pool or reused for a subsequent request, no leftover tenant context can leak across tenant boundaries.
+1. **Mandatory Transaction-Local Context Lifecycle & Pool Reuse**:
+   - **Mandatory Transaction-Local Setting**: `kpi_intel.set_current_tenant_id(p_tenant_id UUID)` establishes the tenant context scoped strictly to the current database transaction (`set_config('kpi_intel.current_tenant_id', ..., true)`). The application-facing API has no `p_is_local` argument, making session-level state impossible through ordinary operations.
+   - **Transaction-Local Clearer**: `kpi_intel.clear_current_tenant_id()` clears the setting within the active transaction scope (`set_config('kpi_intel.current_tenant_id', '', true)`).
+   - **Obsolete Overloads Dropped**: Obsolete callable overloads `set_current_tenant_id(UUID, BOOLEAN)` and `clear_current_tenant_id(BOOLEAN)` are explicitly dropped from the schema, preventing callers from passing `false` to request session-level persistence.
+   - **Connection Pool Safety (PgBouncer, HikariCP)**: Upon `COMMIT` or `ROLLBACK`, PostgreSQL automatically discards transaction-local configuration parameters. When a connection is returned to the pool or reused for a subsequent request, no leftover tenant context can persist across tenant boundaries.
    - **Missing Context Fails Closed**: `kpi_intel.current_tenant_id()` returns `NULL` if unset or cleared. Under SQL boolean logic, `tenant_id = NULL` evaluates to `NULL` (falsy), immediately blocking all reads and writes across all tenant-scoped tables.
    - **Trust Model & Authorization Boundary**:
      > [!IMPORTANT]
      > A custom PostgreSQL setting is an **authorization context / execution parameter**, NOT an authentication mechanism.
      > Untrusted clients (external end-users, direct web traffic) must NEVER have direct PostgreSQL connection access or permission to invoke `set_current_tenant_id`. The application backend serves as the trusted Policy Enforcement Point (PEP): it authenticates the user (via JWT/OAuth2), verifies tenant authorization, opens a database transaction, and sets the transaction-local tenant context.
+   - **Least-Privilege Execution Rights & Search Path**:
+     * Execution rights on `current_tenant_id()`, `set_current_tenant_id(UUID)`, and `clear_current_tenant_id()` are explicitly revoked from `PUBLIC` (`REVOKE ALL ON FUNCTION ... FROM PUBLIC`).
+     * `kpi_app_user` is granted execution; `kpi_readonly` is granted execution only on `current_tenant_id()`.
+     * All context helper functions specify `SECURITY INVOKER SET search_path = pg_catalog, kpi_intel` to eliminate search_path hijacking vulnerabilities.
 
 2. **Complete 61-Table Row-Level Security (RLS) Coverage**:
    All 61 tables in the canonical schema have RLS enabled and explicitly defined:

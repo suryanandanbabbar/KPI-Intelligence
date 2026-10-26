@@ -80,10 +80,34 @@ class TestCanonicalModelIntegrity(unittest.TestCase):
         )
 
     def test_tenant_isolation_functions(self):
-        """Verify tenant resolution helper functions are defined with transaction-local defaults."""
+        """Verify tenant resolution helper functions are strictly transaction-local and accept no p_is_local parameter."""
         self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.current_tenant_id()", self.sql_content)
-        self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.set_current_tenant_id(p_tenant_id UUID, p_is_local BOOLEAN DEFAULT true)", self.sql_content)
-        self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.clear_current_tenant_id(p_is_local BOOLEAN DEFAULT true)", self.sql_content)
+        self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.set_current_tenant_id(p_tenant_id UUID)", self.sql_content)
+        self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.clear_current_tenant_id()", self.sql_content)
+        # Verify p_is_local is completely absent from function signatures
+        self.assertNotIn("set_current_tenant_id(p_tenant_id UUID, p_is_local", self.sql_content)
+        self.assertNotIn("clear_current_tenant_id(p_is_local", self.sql_content)
+        self.assertNotIn("p_is_local BOOLEAN", self.sql_content)
+        # Verify transaction-local boolean literal 'true' is explicitly used
+        self.assertIn("PERFORM set_config('kpi_intel.current_tenant_id', p_tenant_id::TEXT, true);", self.sql_content)
+        self.assertIn("PERFORM set_config('kpi_intel.current_tenant_id', '', true);", self.sql_content)
+
+    def test_tenant_setter_security_and_obsolete_overloads(self):
+        """Verify obsolete overloads are dropped and PUBLIC execution privileges are revoked."""
+        # 1. Dropping obsolete callable overloads
+        self.assertIn("DROP FUNCTION IF EXISTS kpi_intel.set_current_tenant_id(UUID, BOOLEAN);", self.sql_content)
+        self.assertIn("DROP FUNCTION IF EXISTS kpi_intel.clear_current_tenant_id(BOOLEAN);", self.sql_content)
+        # 2. Revoking execution from PUBLIC
+        self.assertIn("REVOKE ALL ON FUNCTION kpi_intel.current_tenant_id() FROM PUBLIC;", self.sql_content)
+        self.assertIn("REVOKE ALL ON FUNCTION kpi_intel.set_current_tenant_id(UUID) FROM PUBLIC;", self.sql_content)
+        self.assertIn("REVOKE ALL ON FUNCTION kpi_intel.clear_current_tenant_id() FROM PUBLIC;", self.sql_content)
+        # 3. Grants to kpi_app_user
+        self.assertIn("GRANT EXECUTE ON FUNCTION kpi_intel.set_current_tenant_id(UUID) TO kpi_app_user;", self.sql_content)
+        self.assertIn("GRANT EXECUTE ON FUNCTION kpi_intel.clear_current_tenant_id() TO kpi_app_user;", self.sql_content)
+        # 4. Search path & security invoker
+        self.assertIn("SECURITY INVOKER SET search_path = pg_catalog, kpi_intel", self.sql_content)
+        # 5. Fail-closed null resolution on missing/invalid context
+        self.assertIn("RETURN NULLIF(current_setting('kpi_intel.current_tenant_id', true), '')::UUID;", self.sql_content)
 
     def test_row_level_security_enabled_all_tables(self):
         """Verify RLS is enabled on all 61 canonical tables and forced on tenant tables."""

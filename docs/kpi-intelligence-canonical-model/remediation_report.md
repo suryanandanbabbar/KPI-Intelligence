@@ -9,28 +9,29 @@
 
 ## Executive Summary
 
-Following an independent architectural review of commit `b495a60`, this report details the final corrective patch applied to the KPI Intelligence platform. All architectural remediations were implemented while strictly retaining the **61-table canonical architecture** without adding unnecessary tables, dropping existing schemas, or altering data grains.
+Following an independent architectural review of commit `b495a60` and the subsequent tenant setter security review in `27b8e19`, this report details the final corrective patch applied to the KPI Intelligence platform. All architectural remediations were implemented while strictly retaining the **61-table canonical architecture** without adding unnecessary tables, dropping existing schemas, or altering data grains.
 
 Key corrective achievements:
-1. **Transaction-Safe Tenant Context & Authorization Trust Model**: Refactored `set_current_tenant_id` to use `is_local = true` (`set_config('kpi_intel.current_tenant_id', ..., true)`), ensuring tenant authorization context is strictly transaction-local and automatically discarded on commit or rollback. Defined the application trust boundary: tenant settings represent authorization context, not authentication, and cannot be invoked by untrusted clients. Created `clear_current_tenant_id()`.
+1. **Mandatory Transaction-Local Tenant Context & Role Boundary**: Refactored `set_current_tenant_id(UUID)` to eliminate `p_is_local` completely from the ordinary application API, making transaction-local state mandatory (`set_config('kpi_intel.current_tenant_id', ..., true)`). Applied the identical restriction to `clear_current_tenant_id()`. Explicitly dropped obsolete overloads (`set_current_tenant_id(UUID, BOOLEAN)`, `clear_current_tenant_id(BOOLEAN)`) to prevent session-level bypass. Revoked execution from `PUBLIC` (`REVOKE ALL ON FUNCTION ... FROM PUBLIC`) and granted execution only to `kpi_app_user` (and `current_tenant_id()` to `kpi_readonly`). Set `SECURITY INVOKER SET search_path = pg_catalog, kpi_intel`. Missing or invalid tenant context fails closed.
 2. **Complete 61-Table RLS Coverage Audit**: Enforced `FORCE ROW LEVEL SECURITY` across all 55 tenant-scoped tables (both direct tenant-owned roots and child tables). Configured direct policies on tenant-keyed tables and parent-derived existential subquery policies on child tables. Configured authenticated read-only policies on 5 global reference tables and 1 system audit ledger table. Documented `ENABLE` vs `FORCE` RLS behavior and clarified PostgreSQL privileged role bypass rules (`superuser` and `BYPASSRLS` roles always bypass RLS).
 3. **Hardened Human-Approval Protection State Machine**: Replaced basic decision-source checks in `protect_human_approval()` with exhaustive field-level transition rules. Automated engines (`LLM`, `DETERMINISTIC`) are strictly barred from: modifying `selected_ontology_entry_id`, changing `kpi_candidate_id`, `asset_version_id`, `ontology_version_id`, or `created_at`, or reverting `APPROVED` status to `PROPOSED` or `UNMAPPED`. Human actors are permitted only valid forward lifecycle transitions (`SUPERSEDED`, `REVOKED`, `OVERRIDDEN`).
 4. **PostgreSQL 15+ Column-Specific Composite Foreign Key Deletion**: Resolved mixed-nullability composite foreign key deletion failures by implementing PostgreSQL 15+ column-specific syntax: `ON DELETE SET NULL (col_to_null)` on `kpi_mappings`, `mapping_reviews`, `mapping_approvals`, and `mapping_overrides`.
 5. **Audit Role Grants, Standardized SQLSTATE & Anti-Cascade RESTRICT**: Configured application role `kpi_app_user` with least-privilege `SELECT, INSERT` on audit tables, revoking `UPDATE`, `DELETE`, and `TRUNCATE`. Updated `prevent_audit_mutation()` to raise standard PostgreSQL authorization error `ERRCODE = '42501'` (`insufficient_privilege`). Maintained anti-cascade `ON DELETE RESTRICT` on audit foreign keys with immutable snapshot keys (`target_kpi_mapping_id`).
 6. **Explicit Migration Contract**: Clarified the dual execution contract: Flyway exact-once immutable migration lifecycle versus standalone idempotent rerunnability via `DROP CONSTRAINT IF EXISTS ... ADD CONSTRAINT` and `DROP POLICY IF EXISTS ... CREATE POLICY`.
 7. **JSONB Semantic Preservation & 11-Field Release Diff Engine**: Explicitly documented PostgreSQL `JSONB` semantic fidelity (types, numbers, booleans, nested keys, Unicode) versus raw byte/whitespace/key-order serialization. Updated `KPIBankParser` and `KPIVersionDiffDetector` to compare all 11 materially relevant KPI fields (`sector`, `subdomain`, `line_of_business`, `kpi_type`, `domain`, `status`, `valid_dimensions`, `aliases`, `formula`, `definition`, `enrichments`).
-8. **Test Verification**: 36/36 static validator checks passed, 11/11 schema integrity tests passed, 19/19 KPI Bank parser tests passed, and 7/7 static DB integration fallback tests passed (with 6 live DB integration tests marked pending per the documented runbook).
+8. **Test Verification**: 36/36 static validator checks passed, 12/12 schema integrity tests passed, 19/19 KPI Bank parser tests passed, and 12/12 static DB integration fallback tests passed (with 12 live DB integration tests marked pending per the documented runbook).
 
 ---
 
 ## 1. Inspection & Confirmed Issues
 
-A rigorous code review of the repository after commit `b495a60` confirmed seven specific architectural issues across the codebase:
+A rigorous code review confirmed seven specific architectural issues across the codebase:
 
-### 1.1 Tenant Context Scope (Session vs Transaction Local)
-- **Confirmed Issue**: In `docs/kpi-intelligence-canonical-model/canonical_schema.sql` and `migrations/V002__canonical_model_hardening.sql`, `set_current_tenant_id(UUID)` invoked `PERFORM set_config('kpi_intel.current_tenant_id', p_tenant_id::TEXT, false)`.
-- **Impact**: The third parameter `false` applies the setting at the session level. In modern connection-pooled environments (e.g. PgBouncer, HikariCP), if a pooled connection is returned to the pool without explicit deallocation, subsequent requests from a different tenant would inherit the prior tenant's authorization context, causing cross-tenant data leakage. Furthermore, if a transaction failed and rolled back, the session setting remained active.
-- **Resolution**: Refactored `set_current_tenant_id` to include `p_is_local BOOLEAN DEFAULT true` and invoke `set_config(..., true)`, making tenant context transaction-local by default. Added `clear_current_tenant_id()` to explicitly purge the setting.
+### 1.1 Tenant Context Scope & Elimination of Session-Level Options
+- **Confirmed Issue**: In commit `27b8e19`, `set_current_tenant_id` was updated to accept `p_is_local BOOLEAN DEFAULT true`. While defaulting to transaction-local, callers could still pass `false`, establishing session-level state via `set_config('kpi_intel.current_tenant_id', ..., false)`.
+- **Impact**: In modern connection-pooled environments (e.g. PgBouncer, HikariCP), an application component passing `false` would cause session-level tenant context to leak to subsequent transactions executed on the same physical connection. Furthermore, if the transaction rolled back, the session setting remained active.
+- **Resolution**: Removed `p_is_local` from the application-facing API. The setter `kpi_intel.set_current_tenant_id(p_tenant_id UUID)` and clearer `kpi_intel.clear_current_tenant_id()` now unconditionally use `set_config(..., true)`. Explicitly dropped obsolete overloads `set_current_tenant_id(UUID, BOOLEAN)` and `clear_current_tenant_id(BOOLEAN)` to prevent callers from invoking legacy session-level signatures. Revoked `EXECUTE` privileges from `PUBLIC` and set `SECURITY INVOKER SET search_path = pg_catalog, kpi_intel`. Missing context continues to fail closed.
+
 
 ### 1.2 RLS Coverage Across Child Tables
 - **Confirmed Issue**: While RLS was enabled on primary operational tables (`assets`, `asset_versions`, `kpi_candidates`, `kpi_mappings`), several descendant child tables (e.g., `visual_properties`, `visual_interactions`, `report_navigation`, `model_partitions`, `hierarchy_levels`, `pivot_field_assignments`, `extraction_errors`) lacked explicit RLS policies, relying solely on parent table joins in application code.
@@ -68,12 +69,12 @@ A rigorous code review of the repository after commit `b495a60` confirmed seven 
 
 | Component / File | Specific Changes Implemented | Architectural Purpose |
 | :--- | :--- | :--- |
-| **`canonical_schema.sql`** | - Added `p_is_local BOOLEAN DEFAULT true` to `set_current_tenant_id`.<br>- Added `clear_current_tenant_id()` function.<br>- Updated `prevent_audit_mutation()` with `ERRCODE = '42501'`.<br>- Hardened `protect_human_approval()` with complete transition matrix.<br>- Updated 4 composite FKs to `ON DELETE SET NULL (col)`.<br>- Added complete 61-table RLS policies with `FORCE ROW LEVEL SECURITY`.<br>- Added application roles `kpi_app_user` and `kpi_readonly` with restricted audit permissions. | Production canonical DDL incorporating transaction-safe tenancy, exhaustive RLS, hardened governance triggers, and role least-privilege. |
-| **`V002__canonical_model_hardening.sql`** | - Added Flyway vs standalone execution contract documentation.<br>- Implemented idempotent `DROP ... IF EXISTS` for all constraints, triggers, and RLS policies.<br>- Mirrored all function, trigger, composite FK, and RLS policy updates from canonical DDL. | Idempotent migration upgrade for existing database instances. |
+| **`canonical_schema.sql`** | - Defined strictly transaction-local `set_current_tenant_id(UUID)` without `p_is_local` argument.<br>- Defined strictly transaction-local `clear_current_tenant_id()`.<br>- Dropped obsolete overloads `set_current_tenant_id(UUID, BOOLEAN)` and `clear_current_tenant_id(BOOLEAN)`.<br>- Revoked execution from `PUBLIC` on tenant functions.<br>- Set `SECURITY INVOKER SET search_path = pg_catalog, kpi_intel` on tenant functions.<br>- Updated `prevent_audit_mutation()` with `ERRCODE = '42501'`.<br>- Hardened `protect_human_approval()` with complete transition matrix.<br>- Updated 4 composite FKs to `ON DELETE SET NULL (col)`.<br>- Added complete 61-table RLS policies with `FORCE ROW LEVEL SECURITY`.<br>- Added application roles `kpi_app_user` and `kpi_readonly` with restricted audit permissions. | Production canonical DDL incorporating transaction-safe tenancy, exhaustive RLS, hardened governance triggers, and role least-privilege. |
+| **`V002__canonical_model_hardening.sql`** | - Added Flyway vs standalone execution contract documentation.<br>- Implemented idempotent `DROP ... IF EXISTS` for all constraints, triggers, and RLS policies.<br>- Mirrored strictly transaction-local functions, overload drops, and revoked PUBLIC permissions from canonical DDL. | Idempotent migration upgrade for existing database instances. |
 | **`scripts/kpi_bank_parser.py`** | - Documented JSONB semantic fidelity vs raw byte serialization.<br>- Extended `compute_content_hash` to include all 11 material fields.<br>- Extended `KPIVersionDiffDetector.compare_releases` with change flags for all 11 material fields.<br>- Enabled top-level `formula` / `calculation` and `metric_description` extraction in `KPIBankParser`. | Production-grade parser, validator, and diff engine for local KPI Bank JSON resources. |
 | **`scripts/test_kpi_bank_parser.py`** | - Added `test_19_diff_detector_all_material_fields` verifying release diff detection across all 11 material fields.<br>- Total tests expanded to 19. | Automated verification of ontology diffing engine. |
-| **`scripts/test_schema_integrity.py`** | - Added assertions for transaction-local `set_current_tenant_id` (`p_is_local`).<br>- Added assertions for `clear_current_tenant_id`.<br>- Added assertions for full 61-table RLS coverage.<br>- Added assertions for column-specific `ON DELETE SET NULL (col)`.<br>- Added assertions for `ERRCODE = '42501'`.<br>- Total tests expanded to 11. | CI/CD static schema integrity verification. |
-| **`scripts/test_db_integration.py`** | - Updated `test_01_tenant_isolation_and_lifecycle` to verify transaction-local rollback reset, sequential tenants, and fail-closed behavior.<br>- Updated `test_03_audit_immutability` to verify `ERRCODE = '42501'`.<br>- Updated `test_04_human_approval_protection` to verify prohibited automated actions and permitted human transitions.<br>- Updated `test_06_composite_fk_column_specific_set_null` to test column-specific nulling.<br>- Added `TestStaticIntegrityFallback` verifying 7 declarative guarantees when live DB is unavailable. | Live integration test suite and static fallback suite. |
+| **`scripts/test_schema_integrity.py`** | - Added assertions for strictly transaction-local `set_current_tenant_id(UUID)` without `p_is_local`.<br>- Added assertions for `clear_current_tenant_id()`.<br>- Added assertions for dropped obsolete overloads.<br>- Added assertions for revoked PUBLIC execution privileges.<br>- Added assertions for full 61-table RLS coverage.<br>- Added assertions for column-specific `ON DELETE SET NULL (col)`.<br>- Added assertions for `ERRCODE = '42501'`.<br>- Total tests expanded to 12. | CI/CD static schema integrity verification. |
+| **`scripts/test_db_integration.py`** | - Implemented 7 targeted live tenant isolation and overload rejection tests (12 live tests total).<br>- Implemented 12 static integrity fallback tests covering all declarative schema guarantees when live DB is unavailable. | Live integration test suite and static fallback suite. |
 | **`implementation_notes.md`** | - Updated Section 1.2 with composite FK column-specific SET NULL details.<br>- Replaced Section 2 with comprehensive coverage of transaction-local tenant lifecycle, pool reuse, trust model, full 61-table RLS matrix, `ENABLE` vs `FORCE RLS`, role grants, and human approval transition rules.<br>- Added Section 5.3 detailing JSONB semantic preservation vs byte serialization and 11-field diff detection.<br>- Updated Section 8.1 with Flyway exact-once vs standalone idempotent rerunnability contracts. | Comprehensive implementation guidelines for platform engineers. |
 
 ---
@@ -312,10 +313,11 @@ TEST SUITE EXECUTION SUMMARY (macOS / Local Sandbox Environment)
      triggers, indexes, domain seeds, and cross-artifact file synchronization.
 
 2. Schema Integrity Test Suite (scripts/test_schema_integrity.py)
-   - Status: PASSED (11/11 tests passed in 0.016s, 0 failures)
+   - Status: PASSED (12/12 tests passed in 0.017s, 0 failures)
    - Verified: Table counts, column completeness, composite FK column-specific SET NULL,
-     tenant functions (p_is_local), clear_current_tenant_id, full 61-table RLS,
-     hardening triggers, and ERRCODE 42501.
+     mandatory transaction-local tenant functions (no p_is_local), dropped obsolete
+     overloads, revoked PUBLIC execution privileges, full 61-table RLS, hardening
+     triggers, and ERRCODE 42501.
 
 3. KPI Bank Parser & Diff Engine Test Suite (scripts/test_kpi_bank_parser.py)
    - Status: PASSED (19/19 tests passed in 0.002s, 0 failures)
@@ -323,15 +325,20 @@ TEST SUITE EXECUTION SUMMARY (macOS / Local Sandbox Environment)
      covering all 11 material diff fields, lossless JSONB retention, and taxonomy independence.
 
 4. Database Integration & Static Fallback Suite (scripts/test_db_integration.py)
-   - Status: PASSED (7 static declarative tests passed; 6 live tests marked pending)
+   - Status: PASSED (12 static declarative tests passed; 12 live tests marked pending)
    - Static Tests Verified:
-     * test_static_schema_has_composite_fk_column_specific_set_null
-     * test_static_schema_has_clear_current_tenant_id
-     * test_static_schema_has_p_is_local_tenant_setting
-     * test_static_schema_has_prevent_audit_mutation_errcode_42501
-     * test_static_schema_has_protect_human_approval_full_matrix
-     * test_static_schema_has_full_61_table_rls_coverage
-     * test_static_schema_has_application_role_definitions
+     * test_ordinary_setter_no_p_is_local
+     * test_setter_explicitly_transaction_local
+     * test_ordinary_clearer_no_session_level
+     * test_obsolete_overloads_dropped
+     * test_rls_tenant_resolution_fails_closed
+     * test_revoke_public_function_execution
+     * test_full_61_table_rls_coverage
+     * test_tenant_scoped_tables_force_rls
+     * test_column_specific_set_null_syntax
+     * test_audit_immutability_sqlstate
+     * test_human_approval_protection_rules
+     * test_role_privilege_isolation
 ================================================================================
 ```
 
@@ -356,13 +363,19 @@ To execute the live integration test suite in staging or CI/CD against PostgreSQ
    python3 scripts/test_db_integration.py
    ```
 
-4. **Expected Live Verification Behavior**:
-   - `test_01_tenant_isolation_and_lifecycle`: Verifies `set_current_tenant_id(UUID, true)` isolates tenant data; verifies transaction rollback immediately clears tenant context; verifies sequential requests for different tenants on the same connection do not leak data; verifies queries without tenant context fail closed.
-   - `test_02_cross_tenant_foreign_key_rejection`: Inserts Asset under Tenant A; attempts to insert Asset Version under Tenant B referencing Asset A; verifies PostgreSQL raises foreign key violation `fk_asset_versions_asset_tenant`.
-   - `test_03_audit_immutability`: Inserts an audit event; attempts `UPDATE` and `DELETE`; verifies trigger `prevent_audit_mutation()` raises SQLSTATE `'42501'`. Verifies `ON DELETE RESTRICT` prevents deleting parent mapping.
-   - `test_04_human_approval_protection`: Approves mapping as `HUMAN`; verifies automated updates (`LLM`) are aborted; verifies immutable key alterations are aborted; verifies transition to `SUPERSEDED` by human actor succeeds.
-   - `test_05_prevent_override_cycle`: Verifies cyclic override chains (`A -> B -> A`) are detected and rejected by `prevent_override_cycle()`.
-   - `test_06_composite_fk_column_specific_set_null`: Inserts an unapproved mapping referencing an ontology entry; deletes the ontology entry; verifies `selected_ontology_entry_id` becomes `NULL` while `ontology_version_id` remains intact.
+4. **Expected Live Verification Behavior (12 Tests)**:
+   - `test_01_tenant_isolation_in_transaction`: Verifies `set_current_tenant_id(UUID)` isolates tenant data within an active transaction.
+   - `test_02_tenant_setting_cleared_on_commit`: Verifies committing a transaction automatically clears the tenant context, preventing persistence into subsequent transactions.
+   - `test_03_tenant_setting_cleared_on_rollback`: Verifies transaction rollback immediately clears tenant context without leakage.
+   - `test_04_sequential_tenants_on_same_connection`: Verifies sequential requests for Tenant A and Tenant B on a reused pooled connection operate in complete isolation.
+   - `test_05_missing_tenant_context_fails_closed`: Verifies queries without tenant context fail closed under RLS (0 rows returned).
+   - `test_06_ordinary_role_cannot_set_session_state`: Verifies the ordinary setter cannot establish session-level state that survives transaction completion.
+   - `test_07_obsolete_function_overload_rejection`: Verifies calling obsolete signatures (`set_current_tenant_id(uuid, false)`, `clear_current_tenant_id(false)`) raises `UndefinedFunction` (PostgreSQL 42883).
+   - `test_08_cross_tenant_fk_rejection`: Verifies PostgreSQL raises foreign key constraint violation `fk_asset_versions_asset_tenant` on cross-tenant links.
+   - `test_09_audit_immutability`: Verifies trigger `prevent_audit_mutation()` raises SQLSTATE `'42501'`.
+   - `test_10_human_approval_protection`: Verifies automated mapping runs cannot overwrite human approvals, immutable keys are locked, and human transitions succeed.
+   - `test_11_override_cycle_prevention`: Verifies cyclic override chains are rejected by `prevent_override_cycle()`.
+   - `test_12_composite_fk_column_specific_set_null`: Verifies deleting referenced entries nulls only the specific nullable referencing column.
 
 ---
 
