@@ -41,6 +41,7 @@ erDiagram
     asset_versions {
         uuid asset_version_id PK
         uuid asset_id FK
+        uuid tenant_id FK
         integer version_number
         text content_hash
         text structure_hash
@@ -61,6 +62,7 @@ erDiagram
     analytical_objects {
         uuid object_id PK
         uuid asset_version_id FK
+        uuid tenant_id FK
         uuid source_artifact_id FK
         text platform
         text canonical_name
@@ -68,6 +70,7 @@ erDiagram
     parser_runs {
         uuid parser_run_id PK
         uuid asset_version_id FK
+        uuid tenant_id FK
         uuid source_artifact_id FK
         text parser_name
         text run_status
@@ -80,13 +83,13 @@ erDiagram
         text error_code
     }
 
-    assets ||--o{ asset_versions : "versioned as"
+    assets ||--o{ asset_versions : "versioned as (asset_id, tenant_id)"
     assets ||--o| asset_versions : "points to current"
     asset_versions ||--o{ ingestion_events : "logged in"
     asset_versions ||--o{ source_artifacts : "unpacks into"
-    asset_versions ||--o{ analytical_objects : "extracts"
+    asset_versions ||--o{ analytical_objects : "extracts (asset_version_id, tenant_id)"
     source_artifacts ||--o{ analytical_objects : "originates"
-    asset_versions ||--o{ parser_runs : "parsed by"
+    asset_versions ||--o{ parser_runs : "parsed by (asset_version_id, tenant_id)"
     source_artifacts ||--o{ parser_runs : "targets"
     parser_runs ||--o{ extraction_errors : "logs errors"
     source_artifacts ||--o{ extraction_errors : "error location"
@@ -450,7 +453,7 @@ erDiagram
 ---
 
 ### ERD 5 — KPI Ontology and Mapping Engine
-Models the local 550+ KPI bank, domain classification, discovery candidates, mapping runs, and ranked candidates.
+Models the local 550+ KPI bank, domain classification, discovery candidates, mapping runs, and ranked candidates with tenant scoping and composite foreign keys.
 
 ```mermaid
 erDiagram
@@ -466,6 +469,9 @@ erDiagram
         text kpi_code
         text kpi_name
         text business_domain
+        text source_kpi_id
+        jsonb valid_dimensions
+        jsonb enrichments
     }
     business_domains {
         uuid domain_id PK
@@ -475,6 +481,7 @@ erDiagram
     domain_classifications {
         uuid classification_id PK
         uuid asset_version_id FK
+        uuid tenant_id FK
         uuid target_object_id FK
         uuid domain_id FK
         boolean is_primary
@@ -482,6 +489,7 @@ erDiagram
     kpi_candidates {
         uuid kpi_candidate_id PK
         uuid asset_version_id FK
+        uuid tenant_id FK
         uuid source_object_id FK
         text candidate_name
         uuid business_domain_id FK
@@ -489,6 +497,7 @@ erDiagram
     kpi_mapping_runs {
         uuid mapping_run_id PK
         uuid asset_version_id FK
+        uuid tenant_id FK
         uuid ontology_version_id FK
         text primary_engine
         boolean fallback_used
@@ -497,6 +506,8 @@ erDiagram
         uuid kpi_mapping_id PK
         uuid kpi_candidate_id FK
         uuid mapping_run_id FK
+        uuid tenant_id FK
+        uuid asset_version_id FK
         uuid ontology_version_id FK
         uuid selected_ontology_entry_id FK
         text mapping_status
@@ -517,31 +528,35 @@ erDiagram
 
     kpi_ontology_versions ||--o{ kpi_ontology_entries : "contains"
     business_domains ||--o{ domain_classifications : "categorizes"
-    analytical_objects ||--o{ domain_classifications : "classified"
-    analytical_objects ||--o{ kpi_candidates : "originates candidate"
+    analytical_objects ||--o{ domain_classifications : "classified (target_object_id, asset_version_id)"
+    asset_versions ||--o{ domain_classifications : "scopes (asset_version_id, tenant_id)"
+    analytical_objects ||--o{ kpi_candidates : "originates candidate (source_object_id, asset_version_id)"
+    asset_versions ||--o{ kpi_candidates : "scopes (asset_version_id, tenant_id)"
     business_domains ||--o{ kpi_candidates : "tagged domain"
     kpi_ontology_versions ||--o{ kpi_mapping_runs : "runs against"
-    kpi_candidates ||--o{ kpi_mappings : "mapped"
-    kpi_mapping_runs ||--o{ kpi_mappings : "produces"
+    asset_versions ||--o{ kpi_mapping_runs : "scopes (asset_version_id, tenant_id)"
+    kpi_candidates ||--o{ kpi_mappings : "mapped (kpi_candidate_id, asset_version_id)"
+    kpi_mapping_runs ||--o{ kpi_mappings : "produces (mapping_run_id, asset_version_id, ontology_version_id)"
     kpi_mappings ||--o{ kpi_mapping_candidates : "proposes (max 3)"
     kpi_ontology_entries ||--o{ kpi_mapping_candidates : "matched entry"
     kpi_mapping_candidates ||--o{ mapping_evidence : "justified by"
 ```
 
 *Relationship Rationales*:
-- `kpi_ontology_versions -> kpi_ontology_entries` ($1:N$): Full versioning of the local JSON ontology bank.
+- `kpi_ontology_versions -> kpi_ontology_entries` ($1:N$): Full versioning of the local JSON ontology bank with normalized source fields and lossless payload preservation.
 - `kpi_mappings -> kpi_mapping_candidates` ($1:1..3$): Database check constraints strictly limit ranked proposals to at most 3 items (ranks 1, 2, 3).
-- `kpi_mapping_candidates -> mapping_evidence` ($1:0..N$): Granular evidence items with explicit polarity (`SUPPORTS`, `CONTRADICTS`, `NEUTRAL`).
+- `kpi_candidates / kpi_mapping_runs -> kpi_mappings` (Composite FKs): Multi-column foreign keys enforce that candidates, mapping runs, and ontology versions originate from identical asset versions.
 
 ---
 
 ### ERD 6 — Human Review, Governance Approvals, and Overrides
-Models SME reviews, immutable approvals, required override justifications, and audit ledgers.
+Models SME reviews, immutable approvals, required override justifications, and audit ledgers with RESTRICT deletion protections and trigger invariants.
 
 ```mermaid
 erDiagram
     kpi_mappings {
         uuid kpi_mapping_id PK
+        uuid tenant_id FK
         text mapping_status
     }
     mapping_reviews {
@@ -559,37 +574,46 @@ erDiagram
     mapping_overrides {
         uuid override_id PK
         uuid kpi_mapping_id FK
+        uuid mapping_candidate_id FK
         text override_justification
         boolean is_active
+        uuid supersedes_override_id FK
     }
     metadata_field_reviews {
         uuid field_review_id PK
+        uuid asset_version_id FK
+        uuid tenant_id FK
         uuid target_object_id FK
         text field_path
         text review_status
     }
     mapping_audit_events {
         uuid mapping_audit_event_id PK
+        uuid tenant_id
         uuid kpi_mapping_id FK
+        uuid target_kpi_mapping_id
         text event_type
     }
     ontology_change_events {
         uuid ontology_change_event_id PK
         uuid ontology_version_id FK
+        uuid ontology_entry_id FK
         text change_type
     }
 
-    kpi_mappings ||--o{ mapping_reviews : "reviewed in"
-    kpi_mappings ||--o{ mapping_approvals : "approved in"
-    kpi_mappings ||--o{ mapping_overrides : "overridden in"
-    analytical_objects ||--o{ metadata_field_reviews : "field reviews"
-    kpi_mappings ||--o{ mapping_audit_events : "audits"
-    kpi_ontology_versions ||--o{ ontology_change_events : "tracks changes"
+    kpi_mappings ||--o{ mapping_reviews : "reviewed in (mapping_candidate_id, kpi_mapping_id)"
+    kpi_mappings ||--o{ mapping_approvals : "approved in (approved_mapping_candidate_id, kpi_mapping_id)"
+    kpi_mappings ||--o{ mapping_overrides : "overridden in (mapping_candidate_id, kpi_mapping_id)"
+    mapping_overrides ||--o| mapping_overrides : "supersedes (acyclic trigger)"
+    analytical_objects ||--o{ metadata_field_reviews : "field reviews (target_object_id, asset_version_id)"
+    kpi_mappings ||--o{ mapping_audit_events : "audits (ON DELETE RESTRICT, immutable trigger)"
+    kpi_ontology_versions ||--o{ ontology_change_events : "tracks changes (ON DELETE RESTRICT, immutable trigger)"
 ```
 
 *Relationship Rationales*:
-- `kpi_mappings -> mapping_approvals` ($1:0..N$ with Unique Partial Index): Exactly one active approval is permitted per mapping (`WHERE approval_status = 'APPROVED'`).
-- `mapping_overrides -> mapping_overrides (supersedes_override_id)` ($1:0..1$): Forms a self-referencing lineage chain of human override adjustments.
+- `kpi_mappings -> mapping_approvals` ($1:0..N$ with Unique Partial Index): Exactly one active approval is permitted per mapping (`WHERE approval_status = 'APPROVED'`). Protected from automatic overwrites by `trg_protect_human_approval`.
+- `mapping_overrides -> mapping_overrides (supersedes_override_id)` ($1:0..1$): Forms an acyclic lineage chain enforced by `trg_prevent_override_cycle`.
+- `mapping_audit_events` & `ontology_change_events`: Complete immutability enforced at schema layer via `ON DELETE RESTRICT` and `BEFORE UPDATE OR DELETE` triggers.
 
 ---
 

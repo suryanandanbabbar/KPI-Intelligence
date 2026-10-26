@@ -1,0 +1,337 @@
+{
+  "schema_version": "1.0.0",
+  "generated_at": "2026-10-26T14:52:00Z",
+  "description": "Representative fixture covering observed KPI Bank JSON structure and all 18 validation edge cases.",
+  "kpis": [
+    {
+      "comment": "Case 1: Complete KPI record matching observed screenshot structure",
+      "kpi_id": "7c194cb9-677a-48e2-a623-ee745b3e7ac4",
+      "name": "% Calls Agent Declined",
+      "definition": "% of calls declined by agents",
+      "domain": "Marketing",
+      "sector": "insurance",
+      "subdomain": "marketing",
+      "line_of_business": null,
+      "aliases": [
+        "Declined Calls %",
+        "Agent Decline Rate",
+        "Agent Decline Percentage"
+      ],
+      "aggregation_type": "PCT",
+      "valid_dimensions": [
+        "Agent",
+        "Date",
+        "Month",
+        "Year",
+        "Campaign",
+        "Channel"
+      ],
+      "created_by": "excel_seed",
+      "created_at": "2026-07-14T06:52:41.880844",
+      "status": "active",
+      "is_active_sector": true,
+      "embedding_model": null,
+      "kpi_type": "built-in",
+      "enrichments": [
+        {
+          "team": "Marketing",
+          "calculation": "(Declined calls / Total incoming calls) x 100",
+          "fields_required": "Declined calls, Total incoming calls",
+          "applicability": "Indicates agent responsiveness",
+          "lob": null,
+          "category": "Operational",
+          "metric_description": "Share of incoming calls that agents declined",
+          "business_meaning": "Shows how often agents turn down calls routed to them.",
+          "la_pc": "P&C",
+          "source": {
+            "file": "KPI_Bank_1.xlsx",
+            "sheet": "Marketing",
+            "row": 2
+          },
+          "extras": {},
+          "field_sources": {}
+        }
+      ]
+    },
+    {
+      "comment": "Case 2: Optional fields set to null",
+      "kpi_id": "8d2a5fb0-1234-4567-89ab-cdef01234567",
+      "name": "Net Incurred Claims",
+      "definition": "Total claims paid plus change in outstanding claims reserve less recoveries",
+      "domain": "Claims & Risk",
+      "sector": "insurance",
+      "subdomain": "claims",
+      "line_of_business": null,
+      "aliases": [],
+      "aggregation_type": "SUM",
+      "valid_dimensions": ["Accident Year", "Line of Business"],
+      "created_by": "system_loader",
+      "created_at": "2026-07-15T10:00:00.000000",
+      "status": "active",
+      "is_active_sector": true,
+      "embedding_model": null,
+      "kpi_type": "built-in",
+      "enrichments": []
+    },
+    {
+      "comment": "Case 3: Multiple aliases & Case 5: Multiple enrichment objects",
+      "kpi_id": "9e3b6fc1-2345-6789-abcd-ef0123456789",
+      "name": "Loss Ratio",
+      "definition": "Ratio of incurred losses and loss adjustment expenses to earned premiums",
+      "domain": "Underwriting",
+      "sector": "insurance",
+      "subdomain": "performance",
+      "line_of_business": "Commercial Property",
+      "aliases": [
+        "Claims Ratio",
+        "Net Loss Ratio",
+        "Incurred Loss Ratio",
+        "LR"
+      ],
+      "aggregation_type": "RATIO",
+      "valid_dimensions": [
+        "Underwriting Year",
+        "Policy Type",
+        "State",
+        "Broker"
+      ],
+      "created_by": "excel_seed",
+      "created_at": "2026-07-14T07:10:00.123456",
+      "status": "active",
+      "is_active_sector": true,
+      "embedding_model": "text-embedding-ada-002",
+      "kpi_type": "built-in",
+      "enrichments": [
+        {
+          "team": "Underwriting",
+          "calculation": "Incurred Losses / Earned Premium",
+          "fields_required": "Incurred Losses, Earned Premium",
+          "applicability": "Measures underwriting profitability",
+          "lob": "Property",
+          "category": "Financial",
+          "metric_description": "Underwriting loss ratio",
+          "business_meaning": "Percentage of premiums used to pay claims",
+          "la_pc": "P&C",
+          "source": {
+            "file": "KPI_Bank_1.xlsx",
+            "sheet": "Underwriting",
+            "row": 15
+          },
+          "extras": {"target_threshold": 0.65},
+          "field_sources": {"incurred_losses": "Claims Ledger", "earned_premium": "Policy Admin"}
+        },
+        {
+          "team": "Actuarial",
+          "calculation": "(Paid Losses + Ending Reserves - Beginning Reserves) / Net Earned Premium",
+          "fields_required": "Paid Losses, Ending Reserves, Beginning Reserves, Net Earned Premium",
+          "applicability": "Reserving adequacy analysis",
+          "lob": "Commercial",
+          "category": "Actuarial",
+          "metric_description": "Actuarial ultimate loss ratio",
+          "business_meaning": "Evaluates adequacy of pricing models against ultimate loss development",
+          "la_pc": "P&C",
+          "source": {
+            "file": "KPI_Bank_Actuarial.xlsx",
+            "sheet": "Reserving",
+            "row": 42
+          },
+          "extras": {"method": "Chain Ladder"},
+          "field_sources": {"reserves": "Actuarial Reserving System"}
+        }
+      ]
+    },
+    {
+      "comment": "Case 4: Multiple valid dimensions & Case 6: Nested source, extras, field_sources",
+      "kpi_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "name": "Policy Renewal Retention Rate",
+      "definition": "Proportion of active policies expiring within a period that are successfully renewed",
+      "domain": "Sales & Distribution",
+      "sector": "insurance",
+      "subdomain": "retention",
+      "line_of_business": "Personal Lines",
+      "aliases": ["Retention %", "Renewal Rate", "Policy Retention"],
+      "aggregation_type": "PCT",
+      "valid_dimensions": [
+        "Channel",
+        "Region",
+        "Agent",
+        "Policy Type",
+        "Renewal Month",
+        "Customer Tier",
+        "Discount Tier"
+      ],
+      "created_by": "migration_script",
+      "created_at": "2026-07-16T12:00:00.000000",
+      "status": "active",
+      "is_active_sector": true,
+      "embedding_model": null,
+      "kpi_type": "built-in",
+      "enrichments": [
+        {
+          "team": "Sales",
+          "calculation": "(Renewed Policies Count / Expiring Policies Count) * 100",
+          "fields_required": "Renewed Policies Count, Expiring Policies Count",
+          "applicability": "Sales pipeline retention",
+          "lob": "Personal Auto",
+          "category": "Operational",
+          "metric_description": "Policy renewal retention percentage",
+          "business_meaning": "Key indicator of policyholder loyalty and churn prevention",
+          "la_pc": "P&C",
+          "source": {
+            "file": "Retention_Dashboard_Export.xlsx",
+            "sheet": "KPIs",
+            "row": 8
+          },
+          "extras": {"benchmark_national": 84.5},
+          "field_sources": {"expiring_policies": "PAS_EXP", "renewed_policies": "PAS_REN"}
+        }
+      ]
+    },
+    {
+      "comment": "Case 7: Unknown additional source fields",
+      "kpi_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+      "name": "Average Expense per Claim",
+      "definition": "Total allocated loss adjustment expenses divided by total reported claims",
+      "domain": "Claims & Risk",
+      "sector": "insurance",
+      "subdomain": "expenses",
+      "line_of_business": "General Liability",
+      "aliases": ["ALAE per Claim", "Average ALAE"],
+      "aggregation_type": "AVG",
+      "valid_dimensions": ["Claim Type", "Coverage", "Jurisdiction"],
+      "created_by": "excel_seed",
+      "created_at": "2026-07-17T08:30:00.000000",
+      "status": "active",
+      "is_active_sector": true,
+      "embedding_model": null,
+      "kpi_type": "built-in",
+      "external_regulatory_id": "NAIC_SCHED_P_PART1",
+      "custom_benchmark_tag": "TIER1_BENCHMARK",
+      "enrichments": []
+    },
+    {
+      "comment": "Case 13: Suspicious placeholder values in field_sources (e.g. 'excel', '11m')",
+      "kpi_id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+      "name": "Customer Acquisition Cost",
+      "definition": "Total marketing and sales expense divided by new policy count",
+      "domain": "Marketing",
+      "sector": "insurance",
+      "subdomain": "acquisition",
+      "line_of_business": null,
+      "aliases": ["CAC"],
+      "aggregation_type": "CURRENCY",
+      "valid_dimensions": ["Channel", "Quarter"],
+      "created_by": "excel_seed",
+      "created_at": "2026-07-14T06:55:00.000000",
+      "status": "active",
+      "is_active_sector": true,
+      "embedding_model": null,
+      "kpi_type": "built-in",
+      "enrichments": [
+        {
+          "team": "Marketing",
+          "calculation": "Total Marketing Spend / New Customers Acquired",
+          "fields_required": "Total Marketing Spend, New Customers Acquired",
+          "applicability": "Campaign efficiency",
+          "lob": null,
+          "category": "Financial",
+          "metric_description": "Cost per acquisition",
+          "business_meaning": "Acquisition efficiency",
+          "la_pc": "P&C",
+          "source": {
+            "file": "KPI_Bank_1.xlsx",
+            "sheet": "Marketing",
+            "row": 10
+          },
+          "extras": {},
+          "field_sources": {
+            "spend": "excel",
+            "customers": "11m"
+          }
+        }
+      ]
+    },
+    {
+      "comment": "Case 14: Non-canonical domain values ('Customer Success', 'Information Technology')",
+      "kpi_id": "d4e5f6a7-b8c9-0123-def1-234567890123",
+      "name": "Portal First Contact Resolution Rate",
+      "definition": "Percentage of digital self-service requests resolved without agent escalation",
+      "domain": "Customer Success",
+      "sector": "insurance",
+      "subdomain": "digital_servicing",
+      "line_of_business": null,
+      "aliases": ["FCR Rate", "Digital FCR"],
+      "aggregation_type": "PCT",
+      "valid_dimensions": ["Request Category", "Platform", "Device"],
+      "created_by": "excel_seed",
+      "created_at": "2026-07-18T09:15:00.000000",
+      "status": "active",
+      "is_active_sector": true,
+      "embedding_model": null,
+      "kpi_type": "built-in",
+      "enrichments": []
+    },
+    {
+      "comment": "Case 17: Deactivated or removed source records",
+      "kpi_id": "e5f6a7b8-c9d0-1234-ef12-345678901234",
+      "name": "Legacy Direct Mail Conversion Rate",
+      "definition": "Historical conversion rate for physical mail solicitation campaigns",
+      "domain": "Marketing",
+      "sector": "insurance",
+      "subdomain": "legacy_channels",
+      "line_of_business": null,
+      "aliases": ["Direct Mail %"],
+      "aggregation_type": "PCT",
+      "valid_dimensions": ["Year", "Zip Code"],
+      "created_by": "excel_seed",
+      "created_at": "2024-01-01T00:00:00.000000",
+      "status": "inactive",
+      "is_active_sector": false,
+      "embedding_model": null,
+      "kpi_type": "built-in",
+      "enrichments": []
+    }
+  ],
+  "malformed_test_records": [
+    {
+      "comment": "Case 8: Missing required identifier (no kpi_id)",
+      "name": "Orphan Metric Without ID",
+      "definition": "An invalid record missing kpi_id",
+      "domain": "Underwriting"
+    },
+    {
+      "comment": "Case 9: Invalid timestamp format",
+      "kpi_id": "f6a7b8c9-d0e1-2345-f123-456789012345",
+      "name": "Metric with Corrupted Timestamp",
+      "definition": "Timestamp cannot be parsed by ISO-8601",
+      "domain": "Claims & Risk",
+      "created_at": "invalid-timestamp-2026-31-02 99:99"
+    },
+    {
+      "comment": "Case 10: Unexpected data type (aliases is integer, valid_dimensions is string)",
+      "kpi_id": "a7b8c9d0-e1f2-3456-1234-567890123456",
+      "name": "Metric with Type Corruption",
+      "definition": "Array fields populated with scalar types",
+      "domain": "Actuarial",
+      "aliases": 12345,
+      "valid_dimensions": "NotAnArray"
+    },
+    {
+      "comment": "Case 11: Duplicate KPI identifier (same ID as Case 1 but different name)",
+      "kpi_id": "7c194cb9-677a-48e2-a623-ee745b3e7ac4",
+      "name": "Colliding Duplicate ID Metric",
+      "definition": "Record with duplicate kpi_id that collides with Case 1",
+      "domain": "Service & Operations"
+    },
+    {
+      "comment": "Case 12: Inconsistent enrichment shapes (enrichment is string instead of dict)",
+      "kpi_id": "b8c9d0e1-f2a3-4567-2345-678901234567",
+      "name": "Metric with Corrupted Enrichment Shape",
+      "definition": "Enrichments contains malformed non-object items",
+      "domain": "Legal",
+      "enrichments": [
+        "String Instead of Object"
+      ]
+    }
+  ]
+}

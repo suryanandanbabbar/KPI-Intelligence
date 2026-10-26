@@ -13,9 +13,13 @@ This document provides architectural guidance, operational protocols, database i
 
 ### 1.2 Referential Actions & Cascade Policies
 - **Parent Container Cascades (`ON DELETE CASCADE`)**:
-  * Deleting an `asset_version` cascades to all version-contained entities (`analytical_objects`, `reports`, `calculations`, `source_artifacts`, `metadata_lineage_edges`).
+  * Deleting an `asset_version` cascades to version-scoped entities (`source_artifacts`, `metadata_lineage_edges`).
   * Deleting a `semantic_model` cascades to its `data_tables`, `calculations`, and `relationships`.
   * Deleting an `analytical_object` cascades to its specific sub-entity (`reports`, `visuals`, `calculations`, etc.) via `ON DELETE CASCADE`.
+- **Strict Audit Immutability & Anti-Cascade (`ON DELETE RESTRICT`)**:
+  * Deleting an operational `kpi_mappings` row is strictly **prohibited** if audit events exist (`mapping_audit_events.kpi_mapping_id` uses `ON DELETE RESTRICT`).
+  * Deleting an ontology version is strictly **prohibited** if ontology change logs exist (`ontology_change_events.ontology_version_id` uses `ON DELETE RESTRICT`).
+  * Audit records retain snapshot identifiers (`target_kpi_mapping_id UUID NOT NULL`) ensuring permanent traceability even across lifecycle transitions.
 - **Audit & Governance Preservation (`ON DELETE SET NULL`)**:
   * Deleting a user does not delete approvals or audit history (`approved_by_user_id` is retained).
   * Deleting a target object sets foreign keys to `NULL` in `query_dependencies` and `mapping_evidence` to preserve historical evidence integrity.
@@ -72,17 +76,39 @@ This document provides architectural guidance, operational protocols, database i
 ## 2. Multi-Tenant Isolation & Access Control
 
 ### 2.1 Tenant Boundary Architecture
-- **Logical Tenant Isolation**: Multi-tenancy is enforced at the data layer using `tenant_id` on root entities (`assets`, `security_principals`).
-- **PostgreSQL Row-Level Security (RLS)**:
-  For multi-tenant SaaS deployments, PostgreSQL RLS policies should be applied on `assets` and propagated via session context variables:
-  ```sql
-  ALTER TABLE kpi_intel.assets ENABLE ROW LEVEL SECURITY;
-  
-  CREATE POLICY tenant_isolation_policy ON kpi_intel.assets
-  USING (tenant_id = current_setting('app.current_tenant_id', true)::uuid);
-  ```
-- **Connection Pooling & Session Variables**:
-  Application connection pools (e.g. PgBouncer or HikariCP) must execute `SET LOCAL app.current_tenant_id = '<tenant-uuid>'` at transaction start.
+The canonical model implements defense-in-depth tenant isolation across three tiers:
+1. **Explicit Transaction-Scoped Session Resolution**:
+   - Tenant context is set securely via `kpi_intel.set_current_tenant_id(UUID)` at transaction start:
+     ```sql
+     SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid);
+     -- Or via standard session setting:
+     SET LOCAL kpi_intel.current_tenant_id = '11111111-1111-1111-1111-111111111111';
+     ```
+   - Helper function `kpi_intel.current_tenant_id()` retrieves the session UUID and raises an explicit error if missing, blocking untrusted queries from running in a global context.
+2. **Row-Level Security (RLS) on Operational Tables**:
+   - Enabled on all operational metadata roots:
+     `assets`, `security_principals`, `asset_versions`, `analytical_objects`, `kpi_candidates`, `kpi_mapping_runs`, `kpi_mappings`, `domain_classifications`, `metadata_field_reviews`, `parser_runs`, `mapping_audit_events`.
+   - Enabled on child tables via relational parent joins (e.g., `reports`, `calculations`, `data_tables`, `kpi_mapping_candidates`, `mapping_approvals`, `mapping_overrides`).
+   - Global reference tables (`business_domains`, `visual_types`, `platform_capabilities`, `kpi_ontology_versions`, `kpi_ontology_entries`) provide authenticated read-only access (`FOR SELECT USING (true)`).
+3. **Composite Foreign Key Boundary Invariants**:
+   - Multi-column foreign keys ensure cross-tenant referencing is physically rejected by the database constraint engine:
+     * `(asset_id, tenant_id) REFERENCES assets(asset_id, tenant_id)`
+     * `(asset_version_id, tenant_id) REFERENCES asset_versions(asset_version_id, tenant_id)`
+     * `(source_object_id, asset_version_id) REFERENCES analytical_objects(object_id, asset_version_id)`
+     * `(kpi_candidate_id, asset_version_id) REFERENCES kpi_candidates(kpi_candidate_id, asset_version_id)`
+     * `(mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id)`
+     * `(approved_mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id)`
+
+### 2.2 Immutable Governance & Integrity Triggers
+1. **`trg_protect_human_approval`**:
+   - Attached to `kpi_mappings`.
+   - Prohibits automated engines from overwriting or changing mappings that were approved by human stewards (`decision_source = 'HUMAN'` and `mapping_status = 'APPROVED'`).
+2. **`trg_mapping_audit_immutable` & `trg_ontology_audit_immutable`**:
+   - Attached to `mapping_audit_events` and `ontology_change_events`.
+   - Prohibits all `UPDATE` and `DELETE` operations on audit tables, guaranteeing tamper-proof, append-only ledgers.
+3. **`trg_prevent_override_cycle`**:
+   - Attached to `mapping_overrides`.
+   - Recursively verifies the `supersedes_override_id` chain to prevent cyclic or self-referential override loops.
 
 ---
 

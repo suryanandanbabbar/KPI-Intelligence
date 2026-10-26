@@ -108,10 +108,10 @@ EXPECTED_TABLES: Dict[str, List[str]] = {
 # Mandatory Columns for each table specified in Section 5 of the Master Prompt
 EXPECTED_COLUMNS: Dict[str, List[str]] = {
     "assets": ["asset_id", "tenant_id", "platform", "asset_type", "asset_name", "asset_description", "source_native_id", "source_native_path", "source_version", "created_at_source", "modified_at_source", "first_ingested_at", "last_ingested_at", "current_version_id", "lifecycle_status", "created_at", "updated_at"],
-    "asset_versions": ["asset_version_id", "asset_id", "version_number", "content_hash", "raw_content_hash", "structure_hash", "metadata_hash", "parser_version", "schema_version", "source_manifest", "extraction_status", "extraction_started_at", "extraction_completed_at", "created_at"],
+    "asset_versions": ["asset_version_id", "asset_id", "tenant_id", "version_number", "content_hash", "raw_content_hash", "structure_hash", "metadata_hash", "parser_version", "schema_version", "source_manifest", "extraction_status", "extraction_started_at", "extraction_completed_at", "created_at"],
     "ingestion_events": ["ingestion_id", "asset_version_id", "uploaded_by_user_id", "original_filename", "upload_size_bytes", "upload_source", "ingestion_status", "error_code", "error_message", "started_at", "completed_at", "created_at"],
     "source_artifacts": ["source_artifact_id", "asset_version_id", "relative_path", "artifact_type", "source_native_id", "content_hash", "mime_type", "size_bytes", "is_supported", "extraction_status", "extraction_notes", "created_at"],
-    "analytical_objects": ["object_id", "asset_version_id", "parent_object_id", "source_artifact_id", "platform", "object_type", "source_native_id", "source_native_name", "canonical_name", "display_name", "description", "source_path", "source_locator", "is_hidden", "is_active", "extraction_status", "metadata_completeness", "source_metadata", "created_at", "updated_at"],
+    "analytical_objects": ["object_id", "asset_version_id", "tenant_id", "parent_object_id", "source_artifact_id", "platform", "object_type", "source_native_id", "source_native_name", "canonical_name", "display_name", "description", "source_path", "source_locator", "is_hidden", "is_active", "extraction_status", "metadata_completeness", "source_metadata", "created_at", "updated_at"],
     "reports": ["report_id", "object_id", "report_type", "report_definition", "default_page_object_id", "page_count", "visual_count", "report_configuration", "created_at"],
     "report_pages": ["page_id", "report_id", "object_id", "source_native_id", "page_name", "page_order", "page_type", "page_properties", "is_hidden", "created_at"],
     "visuals": ["visual_id", "page_id", "object_id", "source_native_id", "visual_type", "visual_title", "visual_description", "position_x", "position_y", "width", "height", "z_order", "visual_configuration", "is_visible", "created_at"],
@@ -147,26 +147,26 @@ EXPECTED_COLUMNS: Dict[str, List[str]] = {
     "spreadsheet_objects": ["spreadsheet_object_id", "object_id", "worksheet_object_id", "object_subtype", "range_reference", "is_hidden", "object_properties"],
     "spreadsheet_rules": ["spreadsheet_rule_id", "object_id", "worksheet_object_id", "rule_type", "range_reference", "formula_text", "expression_language", "rule_properties"],
     "kpi_ontology_versions": ["ontology_version_id", "version_number", "content_hash", "schema_version", "kpi_count", "created_by_user_id", "created_at", "change_summary", "is_active"],
-    "kpi_ontology_entries": ["ontology_entry_id", "ontology_version_id", "kpi_code", "kpi_name", "kpi_description", "business_domain", "definition", "formula", "unit", "aggregation_method", "synonyms", "ontology_payload", "created_at"],
+    "kpi_ontology_entries": ["ontology_entry_id", "ontology_version_id", "kpi_code", "kpi_name", "kpi_description", "business_domain", "definition", "formula", "unit", "aggregation_method", "synonyms", "ontology_payload", "created_at", "source_kpi_id", "source_sector", "source_subdomain", "source_line_of_business", "source_status", "valid_dimensions", "enrichments", "source_created_at", "source_created_by"],
     "business_domains": ["domain_id", "domain_code", "domain_name", "domain_description", "is_active"],
-    "domain_classifications": ["classification_id", "asset_version_id", "target_object_id", "domain_id", "classification_method", "confidence_score", "rationale", "is_primary", "approval_status", "created_at", "updated_at"],
-    "kpi_candidates": ["kpi_candidate_id", "asset_version_id", "source_object_id", "candidate_name", "candidate_description", "candidate_expression", "expression_language", "normalised_expression", "candidate_type", "unit", "aggregation_type", "business_domain_id", "candidate_evidence", "discovery_method", "discovery_version", "created_at"],
-    "kpi_mapping_runs": ["mapping_run_id", "asset_version_id", "ontology_version_id", "candidate_generation_version", "mapping_engine_version", "primary_engine", "fallback_used", "llm_provider", "llm_model", "prompt_version", "input_fingerprint", "run_status", "started_at", "completed_at", "error_summary", "created_at"],
-    "kpi_mappings": ["kpi_mapping_id", "kpi_candidate_id", "mapping_run_id", "ontology_version_id", "selected_ontology_entry_id", "mapping_status", "decision_source", "top_candidate_count", "input_fingerprint", "mapping_version", "created_at", "updated_at"],
+    "domain_classifications": ["classification_id", "asset_version_id", "tenant_id", "target_object_id", "domain_id", "classification_method", "confidence_score", "rationale", "is_primary", "approval_status", "created_at", "updated_at"],
+    "kpi_candidates": ["kpi_candidate_id", "asset_version_id", "tenant_id", "source_object_id", "candidate_name", "candidate_description", "candidate_expression", "expression_language", "normalised_expression", "candidate_type", "unit", "aggregation_type", "business_domain_id", "candidate_evidence", "discovery_method", "discovery_version", "created_at"],
+    "kpi_mapping_runs": ["mapping_run_id", "asset_version_id", "tenant_id", "ontology_version_id", "candidate_generation_version", "mapping_engine_version", "primary_engine", "fallback_used", "llm_provider", "llm_model", "prompt_version", "input_fingerprint", "run_status", "started_at", "completed_at", "error_summary", "created_at"],
+    "kpi_mappings": ["kpi_mapping_id", "kpi_candidate_id", "mapping_run_id", "tenant_id", "asset_version_id", "ontology_version_id", "selected_ontology_entry_id", "mapping_status", "decision_source", "top_candidate_count", "input_fingerprint", "mapping_version", "created_at", "updated_at"],
     "kpi_mapping_candidates": ["mapping_candidate_id", "kpi_mapping_id", "ontology_entry_id", "rank", "confidence_score", "confidence_band", "match_score", "name_similarity_score", "definition_similarity_score", "formula_similarity_score", "context_similarity_score", "domain_compatibility_score", "unit_compatibility_score", "rationale", "supporting_evidence", "contradicting_evidence", "is_recommended", "created_at"],
     "mapping_evidence": ["mapping_evidence_id", "mapping_candidate_id", "evidence_type", "source_object_id", "evidence_text", "evidence_payload", "polarity", "created_at"],
     "mapping_reviews": ["mapping_review_id", "kpi_mapping_id", "mapping_candidate_id", "reviewer_user_id", "review_action", "review_status", "review_comment", "created_at"],
     "mapping_approvals": ["mapping_approval_id", "kpi_mapping_id", "approved_mapping_candidate_id", "approved_by_user_id", "approval_status", "approval_version", "approved_at", "revoked_at", "revocation_reason"],
     "mapping_overrides": ["override_id", "kpi_mapping_id", "mapping_candidate_id", "override_type", "previous_ontology_entry_id", "replacement_ontology_entry_id", "override_justification", "normalised_justification", "justification_hash", "created_by_user_id", "created_at", "is_active", "supersedes_override_id"],
-    "metadata_field_reviews": ["field_review_id", "asset_version_id", "target_object_id", "field_path", "source_value_hash", "proposed_value", "approved_value", "review_status", "reviewed_by_user_id", "reviewed_at", "override_justification", "created_at"],
+    "metadata_field_reviews": ["field_review_id", "asset_version_id", "tenant_id", "target_object_id", "field_path", "source_value_hash", "proposed_value", "approved_value", "review_status", "reviewed_by_user_id", "reviewed_at", "override_justification", "created_at"],
     "kpi_equivalence_candidates": ["equivalence_candidate_id", "source_kpi_candidate_id", "target_kpi_candidate_id", "comparison_type", "name_similarity_score", "definition_similarity_score", "formula_similarity_score", "unit_compatibility_score", "dependency_similarity_score", "equivalence_score", "evidence", "review_status", "created_at"],
     "kpi_rationalisation_decisions": ["rationalisation_decision_id", "equivalence_candidate_id", "decision_type", "canonical_kpi_candidate_id", "approved_by_user_id", "decision_justification", "decision_status", "created_at", "updated_at"],
     "rationalisation_evidence": ["rationalisation_evidence_id", "rationalisation_decision_id", "evidence_type", "evidence_text", "evidence_payload", "created_at"],
     "platform_capabilities": ["platform_capability_id", "platform", "artifact_type", "metadata_type", "capability_status", "minimum_source_version", "maximum_source_version", "notes", "capability_properties"],
-    "parser_runs": ["parser_run_id", "asset_version_id", "source_artifact_id", "platform", "parser_name", "parser_version", "run_status", "objects_extracted", "warnings_count", "errors_count", "started_at", "completed_at", "run_metadata"],
+    "parser_runs": ["parser_run_id", "asset_version_id", "tenant_id", "source_artifact_id", "platform", "parser_name", "parser_version", "run_status", "objects_extracted", "warnings_count", "errors_count", "started_at", "completed_at", "run_metadata"],
     "extraction_errors": ["extraction_error_id", "parser_run_id", "source_artifact_id", "object_locator", "severity", "error_code", "error_message", "is_recoverable", "created_at"],
     "object_tags": ["object_tag_id", "object_id", "tag_name", "tag_value", "tag_source", "created_at"],
-    "mapping_audit_events": ["mapping_audit_event_id", "kpi_mapping_id", "actor_user_id", "event_type", "previous_state", "new_state", "event_reason", "created_at"],
+    "mapping_audit_events": ["mapping_audit_event_id", "tenant_id", "kpi_mapping_id", "target_kpi_mapping_id", "actor_user_id", "event_type", "previous_state", "new_state", "event_reason", "created_at"],
     "ontology_change_events": ["ontology_change_event_id", "ontology_version_id", "ontology_entry_id", "actor_user_id", "change_type", "previous_payload", "new_payload", "change_justification", "created_at"]
 }
 
@@ -423,13 +423,20 @@ def validate_canonical_model(base_dir: str, db_url: str = None) -> bool:
         for fk in tbl_data["foreign_keys"]:
             total_fks += 1
             ref_tbl = fk["ref_table"]
-            ref_col = fk["ref_col"]
+            local_cols = [c.strip() for c in fk["col"].split(',')]
+            ref_cols = [c.strip() for c in fk["ref_col"].split(',')]
             if ref_tbl not in tables:
-                reporter.check(False, f"FK {tbl_name}.{fk['col']} -> {ref_tbl}.{ref_col}", f"Referenced table '{ref_tbl}' not found in schema")
+                reporter.check(False, f"FK {tbl_name}.{fk['col']} -> {ref_tbl}.{fk['ref_col']}", f"Referenced table '{ref_tbl}' not found in schema")
                 fk_errors += 1
-            elif ref_col not in tables[ref_tbl]["columns"]:
-                reporter.check(False, f"FK {tbl_name}.{fk['col']} -> {ref_tbl}.{ref_col}", f"Referenced column '{ref_col}' not found in table '{ref_tbl}'")
-                fk_errors += 1
+            else:
+                missing_local = [c for c in local_cols if c not in tables[tbl_name]["columns"]]
+                missing_ref = [c for c in ref_cols if c not in tables[ref_tbl]["columns"]]
+                if missing_local:
+                    reporter.check(False, f"FK {tbl_name}.{fk['col']} -> {ref_tbl}.{fk['ref_col']}", f"Local column(s) {missing_local} not found in table '{tbl_name}'")
+                    fk_errors += 1
+                elif missing_ref:
+                    reporter.check(False, f"FK {tbl_name}.{fk['col']} -> {ref_tbl}.{fk['ref_col']}", f"Referenced column(s) {missing_ref} not found in table '{ref_tbl}'")
+                    fk_errors += 1
     if fk_errors == 0:
         reporter.check(True, f"All foreign keys reference valid tables & columns ({total_fks} FK references verified)")
 

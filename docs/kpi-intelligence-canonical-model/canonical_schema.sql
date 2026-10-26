@@ -1,9 +1,10 @@
 -- ============================================================================
--- KPI INTELLIGENCE PLATFORM — CANONICAL DATA MODEL DDL
+-- KPI INTELLIGENCE PLATFORM — CANONICAL DATA MODEL DDL (HARDENED)
 -- Subsystem: Canonical Metadata Repository (PostgreSQL 15+)
 -- Schema: kpi_intel
 -- Description: Complete production-grade DDL defining all 61 canonical tables,
---              constraints, indexes, triggers, seed data, and foreign keys.
+--              hardened with multi-tenant RLS, cross-record referential consistency,
+--              immutable audit protections, and lossless KPI Bank JSON normalization.
 -- ============================================================================
 
 \set ON_ERROR_STOP on
@@ -22,12 +23,73 @@ CREATE SCHEMA IF NOT EXISTS kpi_intel;
 SET search_path = kpi_intel, public;
 
 -- ----------------------------------------------------------------------------
--- 2. UTILITY FUNCTIONS & PROCEDURES
+-- 2. UTILITY & SECURITY CONTEXT FUNCTIONS
 -- ----------------------------------------------------------------------------
 CREATE OR REPLACE FUNCTION kpi_intel.set_updated_at()
 RETURNS TRIGGER AS $$
 BEGIN
     NEW.updated_at = clock_timestamp();
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION kpi_intel.current_tenant_id()
+RETURNS UUID AS $$
+BEGIN
+    RETURN NULLIF(current_setting('kpi_intel.current_tenant_id', true), '')::UUID;
+EXCEPTION
+    WHEN OTHERS THEN RETURN NULL;
+END;
+$$ LANGUAGE plpgsql STABLE;
+
+CREATE OR REPLACE FUNCTION kpi_intel.set_current_tenant_id(p_tenant_id UUID)
+RETURNS VOID AS $$
+BEGIN
+    PERFORM set_config('kpi_intel.current_tenant_id', p_tenant_id::TEXT, false);
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION kpi_intel.prevent_audit_mutation()
+RETURNS TRIGGER AS $$
+BEGIN
+    RAISE EXCEPTION 'Audit records in table % are strictly immutable and cannot be updated or deleted.', TG_TABLE_NAME
+        USING ERRCODE = '23505';
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION kpi_intel.protect_human_approval()
+RETURNS TRIGGER AS $$
+BEGIN
+    IF (OLD.mapping_status = 'APPROVED' OR OLD.decision_source = 'HUMAN')
+       AND NEW.decision_source IN ('LLM', 'DETERMINISTIC') THEN
+        RAISE EXCEPTION 'Automated mapping runs cannot overwrite human-approved or human-decided mappings (kpi_mapping_id: %)', OLD.kpi_mapping_id
+            USING ERRCODE = '23514';
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION kpi_intel.prevent_override_cycle()
+RETURNS TRIGGER AS $$
+DECLARE
+    curr_id UUID;
+    visited UUID[] := ARRAY[NEW.override_id];
+BEGIN
+    IF NEW.supersedes_override_id IS NOT NULL THEN
+        IF NEW.supersedes_override_id = NEW.override_id THEN
+            RAISE EXCEPTION 'An override cannot supersede itself (override_id: %)', NEW.override_id
+                USING ERRCODE = '23514';
+        END IF;
+        curr_id := NEW.supersedes_override_id;
+        WHILE curr_id IS NOT NULL LOOP
+            IF curr_id = ANY(visited) THEN
+                RAISE EXCEPTION 'Detected cycle in superseding overrides chain at override_id: %', curr_id
+                    USING ERRCODE = '23514';
+            END IF;
+            visited := array_append(visited, curr_id);
+            SELECT supersedes_override_id INTO curr_id FROM kpi_intel.mapping_overrides WHERE override_id = curr_id;
+        END LOOP;
+    END IF;
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -52,13 +114,13 @@ CREATE TABLE kpi_intel.assets (
     modified_at_source TIMESTAMPTZ,
     first_ingested_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     last_ingested_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    -- Foreign key to asset_versions added via ALTER TABLE
-    current_version_id UUID,
+    current_version_id UUID, -- Foreign key to asset_versions added via ALTER TABLE
     lifecycle_status TEXT NOT NULL DEFAULT 'ACTIVE',
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT ck_assets_platform CHECK (platform IN ('POWER_BI', 'TABLEAU', 'EXCEL', 'THOUGHTSPOT', 'MICROSTRATEGY')),
-    CONSTRAINT ck_assets_lifecycle_status CHECK (lifecycle_status IN ('ACTIVE', 'ARCHIVED', 'DELETED', 'SUPERSEDED'))
+    CONSTRAINT ck_assets_lifecycle_status CHECK (lifecycle_status IN ('ACTIVE', 'ARCHIVED', 'DELETED', 'SUPERSEDED')),
+    CONSTRAINT uq_assets_tenant UNIQUE (asset_id, tenant_id)
 );
 
 COMMENT ON TABLE kpi_intel.assets IS 'Represents logical analytical assets (e.g. workbook, project, report package) across BI platforms.';
@@ -73,7 +135,8 @@ FOR EACH ROW EXECUTE FUNCTION kpi_intel.set_updated_at();
 -- Immutable versions of an asset representing a specific content/metadata state.
 CREATE TABLE kpi_intel.asset_versions (
     asset_version_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    asset_id UUID NOT NULL REFERENCES kpi_intel.assets(asset_id) ON DELETE CASCADE,
+    asset_id UUID NOT NULL,
+    tenant_id UUID NOT NULL,
     version_number INTEGER NOT NULL,
     content_hash TEXT NOT NULL,
     raw_content_hash TEXT NOT NULL,
@@ -87,7 +150,9 @@ CREATE TABLE kpi_intel.asset_versions (
     extraction_completed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT uq_asset_versions_asset_version_number UNIQUE (asset_id, version_number),
-    CONSTRAINT ck_asset_versions_status CHECK (extraction_status IN ('PENDING', 'SUCCESSFUL', 'PARTIAL', 'FAILED'))
+    CONSTRAINT uq_asset_versions_tenant UNIQUE (asset_version_id, tenant_id),
+    CONSTRAINT ck_asset_versions_status CHECK (extraction_status IN ('PENDING', 'SUCCESSFUL', 'PARTIAL', 'FAILED')),
+    CONSTRAINT fk_asset_versions_asset_tenant FOREIGN KEY (asset_id, tenant_id) REFERENCES kpi_intel.assets(asset_id, tenant_id) ON DELETE CASCADE
 );
 
 COMMENT ON TABLE kpi_intel.asset_versions IS 'Immutable snapshots of asset metadata and file structural definitions.';
@@ -149,7 +214,8 @@ COMMENT ON TABLE kpi_intel.source_artifacts IS 'File-level manifest of source ar
 -- Universal identity registry for all BI metadata objects across all platforms.
 CREATE TABLE kpi_intel.analytical_objects (
     object_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    asset_version_id UUID NOT NULL REFERENCES kpi_intel.asset_versions(asset_version_id) ON DELETE CASCADE,
+    asset_version_id UUID NOT NULL,
+    tenant_id UUID NOT NULL,
     parent_object_id UUID REFERENCES kpi_intel.analytical_objects(object_id) ON DELETE CASCADE,
     source_artifact_id UUID REFERENCES kpi_intel.source_artifacts(source_artifact_id) ON DELETE SET NULL,
     platform TEXT NOT NULL,
@@ -170,7 +236,10 @@ CREATE TABLE kpi_intel.analytical_objects (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT ck_analytical_objects_platform CHECK (platform IN ('POWER_BI', 'TABLEAU', 'EXCEL', 'THOUGHTSPOT', 'MICROSTRATEGY')),
     CONSTRAINT ck_analytical_objects_status CHECK (extraction_status IN ('EXTRACTED', 'PARTIAL', 'INFERRED', 'UNRESOLVED', 'FAILED')),
-    CONSTRAINT ck_analytical_objects_completeness CHECK (metadata_completeness IS NULL OR (metadata_completeness >= 0.0000 AND metadata_completeness <= 1.0000))
+    CONSTRAINT ck_analytical_objects_completeness CHECK (metadata_completeness IS NULL OR (metadata_completeness >= 0.0000 AND metadata_completeness <= 1.0000)),
+    CONSTRAINT uq_analytical_objects_version UNIQUE (object_id, asset_version_id),
+    CONSTRAINT uq_analytical_objects_tenant UNIQUE (object_id, tenant_id),
+    CONSTRAINT fk_analytical_objects_version_tenant FOREIGN KEY (asset_version_id, tenant_id) REFERENCES kpi_intel.asset_versions(asset_version_id, tenant_id) ON DELETE CASCADE
 );
 
 COMMENT ON TABLE kpi_intel.analytical_objects IS 'Universal polymorphous identity registry for all discovered BI metadata entities.';
@@ -596,8 +665,8 @@ CREATE TABLE kpi_intel.query_dependencies (
 CREATE TABLE kpi_intel.metadata_lineage_edges (
     lineage_edge_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     asset_version_id UUID NOT NULL REFERENCES kpi_intel.asset_versions(asset_version_id) ON DELETE CASCADE,
-    source_object_id UUID NOT NULL REFERENCES kpi_intel.analytical_objects(object_id) ON DELETE CASCADE,
-    target_object_id UUID NOT NULL REFERENCES kpi_intel.analytical_objects(object_id) ON DELETE CASCADE,
+    source_object_id UUID NOT NULL,
+    target_object_id UUID NOT NULL,
     edge_type TEXT NOT NULL,
     derivation_method TEXT NOT NULL,
     confidence_score NUMERIC(5,4),
@@ -605,7 +674,9 @@ CREATE TABLE kpi_intel.metadata_lineage_edges (
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT ck_lineage_edges_distinct CHECK (source_object_id <> target_object_id),
     CONSTRAINT ck_lineage_edges_derivation CHECK (derivation_method IN ('PARSED', 'SOURCE_DECLARED', 'INFERRED', 'MANUAL')),
-    CONSTRAINT ck_lineage_edges_confidence CHECK (confidence_score IS NULL OR (confidence_score >= 0.0000 AND confidence_score <= 1.0000))
+    CONSTRAINT ck_lineage_edges_confidence CHECK (confidence_score IS NULL OR (confidence_score >= 0.0000 AND confidence_score <= 1.0000)),
+    CONSTRAINT fk_lineage_edges_source_version FOREIGN KEY (source_object_id, asset_version_id) REFERENCES kpi_intel.analytical_objects(object_id, asset_version_id) ON DELETE CASCADE,
+    CONSTRAINT fk_lineage_edges_target_version FOREIGN KEY (target_object_id, asset_version_id) REFERENCES kpi_intel.analytical_objects(object_id, asset_version_id) ON DELETE CASCADE
 );
 
 
@@ -617,8 +688,8 @@ CREATE TABLE kpi_intel.metadata_lineage_edges (
 -- Granular cell coordinates, formulas, and cached evaluation snapshots in XLSX.
 CREATE TABLE kpi_intel.spreadsheet_cells (
     spreadsheet_cell_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    asset_version_id UUID NOT NULL REFERENCES kpi_intel.asset_versions(asset_version_id) ON DELETE CASCADE,
-    worksheet_object_id UUID NOT NULL REFERENCES kpi_intel.analytical_objects(object_id) ON DELETE CASCADE,
+    asset_version_id UUID NOT NULL,
+    worksheet_object_id UUID NOT NULL,
     cell_address TEXT NOT NULL,
     row_number INTEGER NOT NULL,
     column_number INTEGER NOT NULL,
@@ -628,7 +699,8 @@ CREATE TABLE kpi_intel.spreadsheet_cells (
     number_format TEXT,
     is_hidden BOOLEAN NOT NULL DEFAULT false,
     cell_properties JSONB NOT NULL DEFAULT '{}'::jsonb,
-    CONSTRAINT uq_spreadsheet_cells_address UNIQUE (worksheet_object_id, cell_address)
+    CONSTRAINT uq_spreadsheet_cells_address UNIQUE (worksheet_object_id, cell_address),
+    CONSTRAINT fk_spreadsheet_cells_worksheet_version FOREIGN KEY (worksheet_object_id, asset_version_id) REFERENCES kpi_intel.analytical_objects(object_id, asset_version_id) ON DELETE CASCADE
 );
 
 -- 35. pivot_caches
@@ -732,9 +804,19 @@ CREATE TABLE kpi_intel.kpi_ontology_entries (
     unit TEXT,
     aggregation_method TEXT,
     synonyms JSONB NOT NULL DEFAULT '[]'::jsonb,
+    source_kpi_id TEXT,
+    source_sector TEXT,
+    source_subdomain TEXT,
+    source_line_of_business TEXT,
+    source_status TEXT DEFAULT 'active',
+    valid_dimensions JSONB NOT NULL DEFAULT '[]'::jsonb,
+    enrichments JSONB NOT NULL DEFAULT '[]'::jsonb,
+    source_created_at TIMESTAMPTZ,
+    source_created_by TEXT,
     ontology_payload JSONB NOT NULL DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    CONSTRAINT uq_kpi_ontology_entries_code UNIQUE (ontology_version_id, kpi_code)
+    CONSTRAINT uq_kpi_ontology_entries_code UNIQUE (ontology_version_id, kpi_code),
+    CONSTRAINT uq_kpi_ontology_entries_version UNIQUE (ontology_entry_id, ontology_version_id)
 );
 
 -- 42. business_domains
@@ -751,9 +833,10 @@ CREATE TABLE kpi_intel.business_domains (
 -- Classifications of assets, reports, pages, visuals, and KPI candidates into domains.
 CREATE TABLE kpi_intel.domain_classifications (
     classification_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    asset_version_id UUID NOT NULL REFERENCES kpi_intel.asset_versions(asset_version_id) ON DELETE CASCADE,
-    target_object_id UUID NOT NULL REFERENCES kpi_intel.analytical_objects(object_id) ON DELETE CASCADE,
+    asset_version_id UUID NOT NULL,
+    target_object_id UUID NOT NULL,
     domain_id UUID NOT NULL REFERENCES kpi_intel.business_domains(domain_id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL,
     classification_method TEXT NOT NULL,
     confidence_score NUMERIC(5,4),
     rationale TEXT,
@@ -763,7 +846,8 @@ CREATE TABLE kpi_intel.domain_classifications (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT ck_domain_classifications_method CHECK (classification_method IN ('LLM', 'DETERMINISTIC', 'HUMAN', 'INHERITED')),
     CONSTRAINT ck_domain_classifications_status CHECK (approval_status IN ('PENDING', 'APPROVED', 'REJECTED', 'OVERRIDDEN')),
-    CONSTRAINT ck_domain_classifications_confidence CHECK (confidence_score IS NULL OR (confidence_score >= 0.0000 AND confidence_score <= 1.0000))
+    CONSTRAINT ck_domain_classifications_confidence CHECK (confidence_score IS NULL OR (confidence_score >= 0.0000 AND confidence_score <= 1.0000)),
+    CONSTRAINT fk_domain_classifications_object_version FOREIGN KEY (target_object_id, asset_version_id) REFERENCES kpi_intel.analytical_objects(object_id, asset_version_id) ON DELETE CASCADE
 );
 
 -- Enforce at most one effective primary domain per target object and version
@@ -784,8 +868,9 @@ FOR EACH ROW EXECUTE FUNCTION kpi_intel.set_updated_at();
 -- Source calculations, measures, or visual cards discovered as potential KPIs.
 CREATE TABLE kpi_intel.kpi_candidates (
     kpi_candidate_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    asset_version_id UUID NOT NULL REFERENCES kpi_intel.asset_versions(asset_version_id) ON DELETE CASCADE,
-    source_object_id UUID NOT NULL REFERENCES kpi_intel.analytical_objects(object_id) ON DELETE CASCADE,
+    asset_version_id UUID NOT NULL,
+    tenant_id UUID NOT NULL,
+    source_object_id UUID NOT NULL,
     candidate_name TEXT NOT NULL,
     candidate_description TEXT,
     candidate_expression TEXT,
@@ -798,14 +883,19 @@ CREATE TABLE kpi_intel.kpi_candidates (
     candidate_evidence JSONB NOT NULL DEFAULT '{}'::jsonb,
     discovery_method TEXT NOT NULL,
     discovery_version TEXT NOT NULL,
-    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+    created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
+    CONSTRAINT uq_kpi_candidates_version UNIQUE (kpi_candidate_id, asset_version_id),
+    CONSTRAINT uq_kpi_candidates_tenant UNIQUE (kpi_candidate_id, tenant_id),
+    CONSTRAINT fk_kpi_candidates_version_tenant FOREIGN KEY (asset_version_id, tenant_id) REFERENCES kpi_intel.asset_versions(asset_version_id, tenant_id) ON DELETE CASCADE,
+    CONSTRAINT fk_kpi_candidates_object_version FOREIGN KEY (source_object_id, asset_version_id) REFERENCES kpi_intel.analytical_objects(object_id, asset_version_id) ON DELETE CASCADE
 );
 
 -- 45. kpi_mapping_runs
 -- Batch execution record of ontology matching (LLM or deterministic fallback).
 CREATE TABLE kpi_intel.kpi_mapping_runs (
     mapping_run_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    asset_version_id UUID NOT NULL REFERENCES kpi_intel.asset_versions(asset_version_id) ON DELETE CASCADE,
+    asset_version_id UUID NOT NULL,
+    tenant_id UUID NOT NULL,
     ontology_version_id UUID NOT NULL REFERENCES kpi_intel.kpi_ontology_versions(ontology_version_id) ON DELETE CASCADE,
     candidate_generation_version TEXT NOT NULL,
     mapping_engine_version TEXT NOT NULL,
@@ -821,17 +911,21 @@ CREATE TABLE kpi_intel.kpi_mapping_runs (
     error_summary TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT ck_mapping_runs_primary_engine CHECK (primary_engine IN ('LLM', 'DETERMINISTIC')),
-    CONSTRAINT ck_mapping_runs_status CHECK (run_status IN ('PENDING', 'RUNNING', 'SUCCESSFUL', 'PARTIAL', 'FAILED', 'CANCELLED'))
+    CONSTRAINT ck_mapping_runs_status CHECK (run_status IN ('PENDING', 'RUNNING', 'SUCCESSFUL', 'PARTIAL', 'FAILED', 'CANCELLED')),
+    CONSTRAINT uq_kpi_mapping_runs_version UNIQUE (mapping_run_id, asset_version_id, ontology_version_id),
+    CONSTRAINT fk_kpi_mapping_runs_version_tenant FOREIGN KEY (asset_version_id, tenant_id) REFERENCES kpi_intel.asset_versions(asset_version_id, tenant_id) ON DELETE CASCADE
 );
 
 -- 46. kpi_mappings
 -- Current mapping relationship between a source candidate and the ontology bank.
 CREATE TABLE kpi_intel.kpi_mappings (
     kpi_mapping_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    kpi_candidate_id UUID NOT NULL REFERENCES kpi_intel.kpi_candidates(kpi_candidate_id) ON DELETE CASCADE,
-    mapping_run_id UUID NOT NULL REFERENCES kpi_intel.kpi_mapping_runs(mapping_run_id) ON DELETE CASCADE,
+    kpi_candidate_id UUID NOT NULL,
+    asset_version_id UUID NOT NULL,
+    tenant_id UUID NOT NULL,
+    mapping_run_id UUID NOT NULL,
     ontology_version_id UUID NOT NULL REFERENCES kpi_intel.kpi_ontology_versions(ontology_version_id) ON DELETE CASCADE,
-    selected_ontology_entry_id UUID REFERENCES kpi_intel.kpi_ontology_entries(ontology_entry_id) ON DELETE SET NULL,
+    selected_ontology_entry_id UUID,
     mapping_status TEXT NOT NULL DEFAULT 'PROPOSED',
     decision_source TEXT NOT NULL,
     top_candidate_count INTEGER NOT NULL DEFAULT 0,
@@ -841,12 +935,22 @@ CREATE TABLE kpi_intel.kpi_mappings (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT ck_kpi_mappings_status CHECK (mapping_status IN ('PROPOSED', 'APPROVED', 'REJECTED', 'OVERRIDDEN', 'UNMAPPED', 'SUPERSEDED')),
     CONSTRAINT ck_kpi_mappings_source CHECK (decision_source IN ('LLM', 'DETERMINISTIC', 'HUMAN')),
-    CONSTRAINT ck_kpi_mappings_top_count CHECK (top_candidate_count >= 0 AND top_candidate_count <= 3)
+    CONSTRAINT ck_kpi_mappings_top_count CHECK (top_candidate_count >= 0 AND top_candidate_count <= 3),
+    CONSTRAINT uq_kpi_mappings_run_version UNIQUE (kpi_mapping_id, ontology_version_id),
+    CONSTRAINT uq_kpi_mappings_asset_version UNIQUE (kpi_mapping_id, asset_version_id),
+    CONSTRAINT uq_kpi_mappings_tenant UNIQUE (kpi_mapping_id, tenant_id),
+    CONSTRAINT fk_kpi_mappings_candidate_version FOREIGN KEY (kpi_candidate_id, asset_version_id) REFERENCES kpi_intel.kpi_candidates(kpi_candidate_id, asset_version_id) ON DELETE CASCADE,
+    CONSTRAINT fk_kpi_mappings_run_version FOREIGN KEY (mapping_run_id, asset_version_id, ontology_version_id) REFERENCES kpi_intel.kpi_mapping_runs(mapping_run_id, asset_version_id, ontology_version_id) ON DELETE CASCADE,
+    CONSTRAINT fk_kpi_mappings_selected_ontology_entry FOREIGN KEY (selected_ontology_entry_id, ontology_version_id) REFERENCES kpi_intel.kpi_ontology_entries(ontology_entry_id, ontology_version_id) ON DELETE SET NULL
 );
 
 CREATE TRIGGER trg_kpi_mappings_updated_at
 BEFORE UPDATE ON kpi_intel.kpi_mappings
 FOR EACH ROW EXECUTE FUNCTION kpi_intel.set_updated_at();
+
+CREATE TRIGGER trg_protect_human_approval
+BEFORE UPDATE ON kpi_intel.kpi_mappings
+FOR EACH ROW EXECUTE FUNCTION kpi_intel.protect_human_approval();
 
 -- 47. kpi_mapping_candidates
 -- Ranked proposals (maximum top 3) from the matching engines.
@@ -871,6 +975,7 @@ CREATE TABLE kpi_intel.kpi_mapping_candidates (
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT uq_mapping_candidates_mapping_entry UNIQUE (kpi_mapping_id, ontology_entry_id),
     CONSTRAINT uq_mapping_candidates_mapping_rank UNIQUE (kpi_mapping_id, rank),
+    CONSTRAINT uq_kpi_mapping_candidates_mapping UNIQUE (mapping_candidate_id, kpi_mapping_id),
     CONSTRAINT ck_mapping_candidates_rank CHECK (rank >= 1 AND rank <= 3),
     CONSTRAINT ck_mapping_candidates_confidence CHECK (confidence_score >= 0.0000 AND confidence_score <= 1.0000),
     CONSTRAINT ck_mapping_candidates_band CHECK (confidence_band IN ('HIGH', 'MEDIUM', 'LOW', 'UNCERTAIN')),
@@ -906,14 +1011,15 @@ CREATE TABLE kpi_intel.mapping_evidence (
 CREATE TABLE kpi_intel.mapping_reviews (
     mapping_review_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     kpi_mapping_id UUID NOT NULL REFERENCES kpi_intel.kpi_mappings(kpi_mapping_id) ON DELETE CASCADE,
-    mapping_candidate_id UUID REFERENCES kpi_intel.kpi_mapping_candidates(mapping_candidate_id) ON DELETE SET NULL,
+    mapping_candidate_id UUID,
     reviewer_user_id UUID NOT NULL,
     review_action TEXT NOT NULL,
     review_status TEXT NOT NULL DEFAULT 'COMPLETED',
     review_comment TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT ck_mapping_reviews_action CHECK (review_action IN ('APPROVE', 'REJECT', 'CHOOSE_ANOTHER', 'ADD_KPI', 'REQUEST_REMAPPING', 'MARK_UNMAPPED')),
-    CONSTRAINT ck_mapping_reviews_status CHECK (review_status IN ('PENDING', 'COMPLETED', 'WITHDRAWN'))
+    CONSTRAINT ck_mapping_reviews_status CHECK (review_status IN ('PENDING', 'COMPLETED', 'WITHDRAWN')),
+    CONSTRAINT fk_mapping_reviews_candidate_mapping FOREIGN KEY (mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_intel.kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id) ON DELETE SET NULL
 );
 
 -- 50. mapping_approvals
@@ -921,14 +1027,15 @@ CREATE TABLE kpi_intel.mapping_reviews (
 CREATE TABLE kpi_intel.mapping_approvals (
     mapping_approval_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     kpi_mapping_id UUID NOT NULL REFERENCES kpi_intel.kpi_mappings(kpi_mapping_id) ON DELETE CASCADE,
-    approved_mapping_candidate_id UUID REFERENCES kpi_intel.kpi_mapping_candidates(mapping_candidate_id) ON DELETE SET NULL,
+    approved_mapping_candidate_id UUID,
     approved_by_user_id UUID NOT NULL,
     approval_status TEXT NOT NULL DEFAULT 'APPROVED',
     approval_version INTEGER NOT NULL DEFAULT 1,
     approved_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     revoked_at TIMESTAMPTZ,
     revocation_reason TEXT,
-    CONSTRAINT ck_mapping_approvals_status CHECK (approval_status IN ('APPROVED', 'REVOKED', 'SUPERSEDED'))
+    CONSTRAINT ck_mapping_approvals_status CHECK (approval_status IN ('APPROVED', 'REVOKED', 'SUPERSEDED')),
+    CONSTRAINT fk_mapping_approvals_candidate_mapping FOREIGN KEY (approved_mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_intel.kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id) ON DELETE SET NULL
 );
 
 -- Enforce exactly one active approval per mapping
@@ -941,7 +1048,7 @@ WHERE (approval_status = 'APPROVED');
 CREATE TABLE kpi_intel.mapping_overrides (
     override_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     kpi_mapping_id UUID NOT NULL REFERENCES kpi_intel.kpi_mappings(kpi_mapping_id) ON DELETE CASCADE,
-    mapping_candidate_id UUID REFERENCES kpi_intel.kpi_mapping_candidates(mapping_candidate_id) ON DELETE SET NULL,
+    mapping_candidate_id UUID,
     override_type TEXT NOT NULL,
     previous_ontology_entry_id UUID REFERENCES kpi_intel.kpi_ontology_entries(ontology_entry_id) ON DELETE SET NULL,
     replacement_ontology_entry_id UUID REFERENCES kpi_intel.kpi_ontology_entries(ontology_entry_id) ON DELETE SET NULL,
@@ -953,15 +1060,21 @@ CREATE TABLE kpi_intel.mapping_overrides (
     is_active BOOLEAN NOT NULL DEFAULT true,
     supersedes_override_id UUID REFERENCES kpi_intel.mapping_overrides(override_id) ON DELETE SET NULL,
     CONSTRAINT ck_mapping_overrides_type CHECK (override_type IN ('REJECT', 'SELECT_ALTERNATIVE', 'ADD_KPI', 'FORCE_UNMAPPED', 'REMAP', 'OTHER')),
-    CONSTRAINT ck_mapping_overrides_justification_not_empty CHECK (length(trim(override_justification)) > 0)
+    CONSTRAINT ck_mapping_overrides_justification_not_empty CHECK (length(trim(override_justification)) > 0),
+    CONSTRAINT fk_mapping_overrides_candidate_mapping FOREIGN KEY (mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_intel.kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id) ON DELETE SET NULL
 );
+
+CREATE TRIGGER trg_prevent_override_cycle
+BEFORE INSERT OR UPDATE ON kpi_intel.mapping_overrides
+FOR EACH ROW EXECUTE FUNCTION kpi_intel.prevent_override_cycle();
 
 -- 52. metadata_field_reviews
 -- Human overrides and reviews of specific extracted metadata attributes.
 CREATE TABLE kpi_intel.metadata_field_reviews (
     field_review_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    asset_version_id UUID NOT NULL REFERENCES kpi_intel.asset_versions(asset_version_id) ON DELETE CASCADE,
-    target_object_id UUID NOT NULL REFERENCES kpi_intel.analytical_objects(object_id) ON DELETE CASCADE,
+    asset_version_id UUID NOT NULL,
+    target_object_id UUID NOT NULL,
+    tenant_id UUID NOT NULL,
     field_path TEXT NOT NULL,
     source_value_hash TEXT NOT NULL,
     proposed_value JSONB NOT NULL,
@@ -971,7 +1084,8 @@ CREATE TABLE kpi_intel.metadata_field_reviews (
     reviewed_at TIMESTAMPTZ,
     override_justification TEXT,
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
-    CONSTRAINT ck_field_reviews_status CHECK (review_status IN ('PENDING', 'APPROVED', 'REJECTED', 'OVERRIDDEN'))
+    CONSTRAINT ck_field_reviews_status CHECK (review_status IN ('PENDING', 'APPROVED', 'REJECTED', 'OVERRIDDEN')),
+    CONSTRAINT fk_metadata_field_reviews_object_version FOREIGN KEY (target_object_id, asset_version_id) REFERENCES kpi_intel.analytical_objects(object_id, asset_version_id) ON DELETE CASCADE
 );
 
 
@@ -1070,6 +1184,7 @@ CREATE TABLE kpi_intel.platform_capabilities (
 CREATE TABLE kpi_intel.parser_runs (
     parser_run_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     asset_version_id UUID NOT NULL REFERENCES kpi_intel.asset_versions(asset_version_id) ON DELETE CASCADE,
+    tenant_id UUID NOT NULL,
     source_artifact_id UUID REFERENCES kpi_intel.source_artifacts(source_artifact_id) ON DELETE SET NULL,
     platform TEXT NOT NULL,
     parser_name TEXT NOT NULL,
@@ -1119,7 +1234,9 @@ ON kpi_intel.object_tags (object_id, tag_name, COALESCE(tag_value, ''));
 -- Complete immutable audit trail of state transitions in the mapping lifecycle.
 CREATE TABLE kpi_intel.mapping_audit_events (
     mapping_audit_event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    kpi_mapping_id UUID NOT NULL REFERENCES kpi_intel.kpi_mappings(kpi_mapping_id) ON DELETE CASCADE,
+    kpi_mapping_id UUID REFERENCES kpi_intel.kpi_mappings(kpi_mapping_id) ON DELETE RESTRICT,
+    target_kpi_mapping_id UUID NOT NULL,
+    tenant_id UUID NOT NULL,
     actor_user_id UUID NOT NULL,
     event_type TEXT NOT NULL,
     previous_state JSONB NOT NULL DEFAULT '{}'::jsonb,
@@ -1128,11 +1245,15 @@ CREATE TABLE kpi_intel.mapping_audit_events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
 );
 
+CREATE TRIGGER trg_mapping_audit_immutable
+BEFORE UPDATE OR DELETE ON kpi_intel.mapping_audit_events
+FOR EACH ROW EXECUTE FUNCTION kpi_intel.prevent_audit_mutation();
+
 -- 61. ontology_change_events
 -- Immutable audit log recording additions and modifications to the local ontology.
 CREATE TABLE kpi_intel.ontology_change_events (
     ontology_change_event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    ontology_version_id UUID NOT NULL REFERENCES kpi_intel.kpi_ontology_versions(ontology_version_id) ON DELETE CASCADE,
+    ontology_version_id UUID NOT NULL REFERENCES kpi_intel.kpi_ontology_versions(ontology_version_id) ON DELETE RESTRICT,
     ontology_entry_id UUID REFERENCES kpi_intel.kpi_ontology_entries(ontology_entry_id) ON DELETE SET NULL,
     actor_user_id UUID NOT NULL,
     change_type TEXT NOT NULL,
@@ -1142,6 +1263,10 @@ CREATE TABLE kpi_intel.ontology_change_events (
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT ck_ontology_change_type CHECK (change_type IN ('ADD', 'UPDATE', 'DEPRECATE', 'RESTORE', 'IMPORT'))
 );
+
+CREATE TRIGGER trg_ontology_audit_immutable
+BEFORE UPDATE OR DELETE ON kpi_intel.ontology_change_events
+FOR EACH ROW EXECUTE FUNCTION kpi_intel.prevent_audit_mutation();
 
 
 -- ============================================================================
@@ -1191,6 +1316,8 @@ CREATE INDEX idx_pivot_field_assignments_pivot ON kpi_intel.pivot_field_assignme
 -- Subsystem F Indexes
 CREATE INDEX idx_kpi_ontology_entries_version_code ON kpi_intel.kpi_ontology_entries (ontology_version_id, kpi_code);
 CREATE INDEX idx_kpi_ontology_entries_name_trgm ON kpi_intel.kpi_ontology_entries USING gin (kpi_name gin_trgm_ops);
+CREATE INDEX idx_kpi_ontology_entries_source_kpi_id ON kpi_intel.kpi_ontology_entries (ontology_version_id, source_kpi_id);
+CREATE INDEX idx_kpi_ontology_entries_sector_subdomain ON kpi_intel.kpi_ontology_entries (source_sector, source_subdomain);
 CREATE INDEX idx_domain_classifications_target_status ON kpi_intel.domain_classifications (target_object_id, approval_status);
 CREATE INDEX idx_domain_classifications_version ON kpi_intel.domain_classifications (asset_version_id);
 
@@ -1228,7 +1355,118 @@ CREATE INDEX idx_ontology_change_events_version ON kpi_intel.ontology_change_eve
 
 
 -- ============================================================================
--- 4. SEED DATA: BUSINESS DOMAINS
+-- 4. ROW-LEVEL SECURITY (RLS) POLICIES
+-- ============================================================================
+
+-- Enable RLS on all tenant-owned root tables
+ALTER TABLE kpi_intel.assets ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.security_principals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.asset_versions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.analytical_objects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.kpi_candidates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.kpi_mapping_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.kpi_mappings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.domain_classifications ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.metadata_field_reviews ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.parser_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.mapping_audit_events ENABLE ROW LEVEL SECURITY;
+
+-- Root table tenant policies
+CREATE POLICY tenant_isolation_policy_assets ON kpi_intel.assets
+FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
+
+CREATE POLICY tenant_isolation_policy_principals ON kpi_intel.security_principals
+FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
+
+CREATE POLICY tenant_isolation_policy_versions ON kpi_intel.asset_versions
+FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
+
+CREATE POLICY tenant_isolation_policy_objects ON kpi_intel.analytical_objects
+FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
+
+CREATE POLICY tenant_isolation_policy_candidates ON kpi_intel.kpi_candidates
+FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
+
+CREATE POLICY tenant_isolation_policy_mapping_runs ON kpi_intel.kpi_mapping_runs
+FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
+
+CREATE POLICY tenant_isolation_policy_mappings ON kpi_intel.kpi_mappings
+FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
+
+CREATE POLICY tenant_isolation_policy_domain_class ON kpi_intel.domain_classifications
+FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
+
+CREATE POLICY tenant_isolation_policy_field_reviews ON kpi_intel.metadata_field_reviews
+FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
+
+CREATE POLICY tenant_isolation_policy_parser_runs ON kpi_intel.parser_runs
+FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
+
+CREATE POLICY tenant_isolation_policy_audit_events ON kpi_intel.mapping_audit_events
+FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
+
+-- Enable RLS on child tables to prevent direct bypass queries
+ALTER TABLE kpi_intel.reports ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_reports ON kpi_intel.reports
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = reports.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.calculations ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_calculations ON kpi_intel.calculations
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = calculations.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.data_tables ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_data_tables ON kpi_intel.data_tables
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = data_tables.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.kpi_mapping_candidates ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_map_cands ON kpi_intel.kpi_mapping_candidates
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.kpi_mappings km 
+    WHERE km.kpi_mapping_id = kpi_mapping_candidates.kpi_mapping_id AND km.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.mapping_approvals ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_approvals ON kpi_intel.mapping_approvals
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.kpi_mappings km 
+    WHERE km.kpi_mapping_id = mapping_approvals.kpi_mapping_id AND km.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.mapping_overrides ENABLE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_overrides ON kpi_intel.mapping_overrides
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.kpi_mappings km 
+    WHERE km.kpi_mapping_id = mapping_overrides.kpi_mapping_id AND km.tenant_id = kpi_intel.current_tenant_id()
+));
+
+-- Global reference tables have public/authenticated read-only policy
+ALTER TABLE kpi_intel.business_domains ENABLE ROW LEVEL SECURITY;
+CREATE POLICY global_read_domains ON kpi_intel.business_domains FOR SELECT USING (true);
+
+ALTER TABLE kpi_intel.visual_types ENABLE ROW LEVEL SECURITY;
+CREATE POLICY global_read_visual_types ON kpi_intel.visual_types FOR SELECT USING (true);
+
+ALTER TABLE kpi_intel.platform_capabilities ENABLE ROW LEVEL SECURITY;
+CREATE POLICY global_read_platform_caps ON kpi_intel.platform_capabilities FOR SELECT USING (true);
+
+ALTER TABLE kpi_intel.kpi_ontology_versions ENABLE ROW LEVEL SECURITY;
+CREATE POLICY global_read_ontology_versions ON kpi_intel.kpi_ontology_versions FOR SELECT USING (true);
+
+ALTER TABLE kpi_intel.kpi_ontology_entries ENABLE ROW LEVEL SECURITY;
+CREATE POLICY global_read_ontology_entries ON kpi_intel.kpi_ontology_entries FOR SELECT USING (true);
+
+
+-- ============================================================================
+-- 5. SEED DATA: BUSINESS DOMAINS
 -- ============================================================================
 INSERT INTO kpi_intel.business_domains (domain_id, domain_code, domain_name, domain_description, is_active)
 VALUES

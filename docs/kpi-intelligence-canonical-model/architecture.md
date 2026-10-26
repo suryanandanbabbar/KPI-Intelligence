@@ -351,3 +351,64 @@ All platform-specific abstractions are projected into a unified polymorphous sch
 | **Malformed LLM Output** | LLM Output Validator | Output is validated against JSON Schema. If parsing fails or output violates top-3 ranking constraints, the run logs the raw response to `error_summary` and falls back to deterministic candidate ranking. |
 | **Ontology Version Desync** | Local Ontology Loader | During startup, verifies local JSON hash against active record in `kpi_ontology_versions`. If hash does not match, loads JSON in staging, creates new version, and notifies governance admins. |
 | **Concurrent Human Approvals** | Approval Ledger | Enforced via PostgreSQL row-level locks (`SELECT FOR UPDATE`) and unique partial index `uq_mapping_approvals_active` ensuring at most one active approval per mapping. |
+
+---
+
+## 5. Hardened Security, Multi-Tenant Isolation & Immutable Governance Architecture
+
+### 5.1 Multi-Tenant Isolation Architecture
+The platform enforces a defense-in-depth tenant isolation model across three synchronized layers:
+
+```
+[ Trusted App Auth Gateway / JWT Context ]
+                     │
+                     ▼
+  [ Transaction Session Resolution ]
+     SET LOCAL kpi_intel.current_tenant_id = '...'
+                     │
+         ┌───────────┴───────────┐
+         ▼                       ▼
+[ PostgreSQL Row Level Security ]  [ Composite Foreign Key Invariants ]
+  Enforces tenant scoping at       Enforces physical DB constraint rejection
+  query runtime for all DML.        if child tenant_id != parent tenant_id.
+```
+
+1. **Authoritative Session Context**:
+   - Tenant identity originates strictly from authenticated session claims, never from untrusted client parameters or file path strings.
+   - Database operations execute within a transaction setting `kpi_intel.current_tenant_id = '<tenant_uuid>'`, retrieved securely via `kpi_intel.current_tenant_id()`.
+   - If no tenant context is set, `current_tenant_id()` raises an exception, preventing unintended global access.
+2. **Row Level Security (RLS)**:
+   - Enabled across all operational metadata tables (`assets`, `asset_versions`, `analytical_objects`, `kpi_candidates`, `kpi_mapping_runs`, `kpi_mappings`, `domain_classifications`, `metadata_field_reviews`, `parser_runs`, `mapping_audit_events`).
+   - Root tables enforce direct `USING (tenant_id = kpi_intel.current_tenant_id())`.
+   - Child tables enforce parent-joining policies (e.g. `reports` joins to `analytical_objects.tenant_id`).
+   - Global reference tables (`business_domains`, `visual_types`, `platform_capabilities`, `kpi_ontology_versions`, `kpi_ontology_entries`) have authenticated read-only access (`FOR SELECT USING (true)`).
+3. **Composite Foreign Key Invariants**:
+   - Multi-column foreign keys `(asset_id, tenant_id)`, `(asset_version_id, tenant_id)`, etc. guarantee that cross-tenant record creation is rejected at the database engine constraint level, even for queries running under database administrator or superuser privileges where RLS might be bypassed.
+
+### 5.2 Immutable Governance & Audit Layer
+Audit integrity is protected against administrative tampering, cascade deletion, and state corruption:
+1. **Cascade Deletion Prohibition (`ON DELETE RESTRICT`)**:
+   - `mapping_audit_events.kpi_mapping_id` references `kpi_mappings` with `ON DELETE RESTRICT`. Any attempt to delete an operational mapping that has associated audit history is rejected by PostgreSQL.
+   - `ontology_change_events.ontology_version_id` references `kpi_ontology_versions` with `ON DELETE RESTRICT`.
+   - `target_kpi_mapping_id UUID NOT NULL` stores an immutable snapshot key on each audit event, ensuring traceability survives even if operational mappings are soft-deleted or archived.
+2. **Database Mutation Prevention Triggers**:
+   - `trg_mapping_audit_immutable` and `trg_ontology_audit_immutable` attach to `mapping_audit_events` and `ontology_change_events` respectively. Any `UPDATE` or `DELETE` statement triggers `kpi_intel.prevent_audit_mutation()`, immediately raising an uncatchable exception: `"Audit ledger records are strictly append-only and immutable"`.
+   - `trg_protect_human_approval` verifies that once an SME formally approves a mapping (`decision_source = 'HUMAN'` and `mapping_status = 'APPROVED'`), subsequent automated engine runs cannot overwrite or revert the mapping status without explicit human intervention.
+   - `trg_prevent_override_cycle` intercepts `mapping_overrides` insertions and updates, traversing the `supersedes_override_id` chain to prevent cyclic or self-referencing override sequences.
+
+### 5.3 KPI Bank Ingestion, Normalization & Diff Engine
+The local KPI Ontology Bank (~550+ insurance and enterprise metrics) is ingested via a dedicated, local-only parsing engine (`scripts/kpi_bank_parser.py`):
+1. **Local-Only Resource Rule**:
+   - The engine interacts strictly with local filesystem resources (`fixtures/kpi_bank_representative_fixture.json`). No external HTTP/REST network calls are made.
+2. **Lossless Raw Preservation**:
+   - 100% of the raw JSON object is preserved verbatim in `kpi_ontology_entries.ontology_payload` (JSONB), ensuring zero loss of vendor-specific tags, nested annotations, or custom properties.
+3. **Structured Normalization**:
+   - Extracts and standardizes top-level source properties into dedicated relational columns: `source_kpi_id`, `source_sector`, `source_subdomain`, `source_line_of_business`, `source_status`, `valid_dimensions` (JSONB array), `enrichments` (JSONB object), `source_created_at`, and `source_created_by`.
+4. **Taxonomy Independence**:
+   - Source-native domain strings (e.g. `"Marketing"`, `"Customer Experience"`) are preserved in `business_domain` and `ontology_payload`. They are never forced or mangled into the 6 application business domains (`CLAIMS_RISK`, `LEGAL`, `UNDERWRITING`, `SALES_DISTRIBUTION`, `SERVICE_OPERATIONS`, `ACTUARIAL`).
+5. **Ontology Version Diffing Engine**:
+   - `KPIVersionDiffDetector` compares two ontology versions, identifying:
+     * `added_kpis`: New metric definitions.
+     * `removed_kpis`: Deprecated or deleted metrics.
+     * `modified_kpis`: Field-level differences (`formula`, `definition`, `dimensions`, `enrichments`).
+   - Every detected alteration generates an atomic audit entry in `ontology_change_events`.

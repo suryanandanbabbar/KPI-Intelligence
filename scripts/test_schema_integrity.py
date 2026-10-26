@@ -53,9 +53,13 @@ class TestCanonicalModelIntegrity(unittest.TestCase):
         for table_name, data in self.tables.items():
             for fk in data["foreign_keys"]:
                 ref_tbl = fk["ref_table"]
-                ref_col = fk["ref_col"]
+                local_cols = [c.strip() for c in fk["col"].split(',')]
+                ref_cols = [c.strip() for c in fk["ref_col"].split(',')]
                 self.assertIn(ref_tbl, self.tables, f"FK {table_name}.{fk['col']} references non-existent table {ref_tbl}")
-                self.assertIn(ref_col, self.tables[ref_tbl]["columns"], f"FK {table_name}.{fk['col']} references non-existent col {ref_tbl}.{ref_col}")
+                for lc in local_cols:
+                    self.assertIn(lc, self.tables[table_name]["columns"], f"FK {table_name}.{fk['col']} references non-existent local col {table_name}.{lc}")
+                for rc in ref_cols:
+                    self.assertIn(rc, self.tables[ref_tbl]["columns"], f"FK {table_name}.{fk['col']} references non-existent col {ref_tbl}.{rc}")
 
     def test_business_domain_seeds(self):
         """Verify that all 6 required business domains are seeded."""
@@ -74,6 +78,30 @@ class TestCanonicalModelIntegrity(unittest.TestCase):
             "uq_mapping_approvals_active" in index_names or any("approved" in idx["definition"] for idx in self.indexes),
             "Missing single active approval invariant index"
         )
+
+    def test_tenant_isolation_functions(self):
+        """Verify tenant resolution helper functions are defined."""
+        self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.current_tenant_id()", self.sql_content)
+        self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.set_current_tenant_id", self.sql_content)
+
+    def test_row_level_security_enabled(self):
+        """Verify RLS is enabled on tenant-owned tables."""
+        tenant_tables = [
+            "assets", "asset_versions", "analytical_objects", "kpi_candidates",
+            "kpi_mapping_runs", "kpi_mappings", "mapping_audit_events"
+        ]
+        for tbl in tenant_tables:
+            self.assertIn(f"ALTER TABLE kpi_intel.{tbl} ENABLE ROW LEVEL SECURITY;", self.sql_content)
+
+    def test_hardening_triggers_defined(self):
+        """Verify immutable governance triggers are defined and attached."""
+        self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.prevent_audit_mutation()", self.sql_content)
+        self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.protect_human_approval()", self.sql_content)
+        self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.prevent_override_cycle()", self.sql_content)
+        self.assertIn("trg_protect_human_approval", self.sql_content)
+        self.assertIn("trg_mapping_audit_immutable", self.sql_content)
+        self.assertIn("trg_ontology_audit_immutable", self.sql_content)
+        self.assertIn("trg_prevent_override_cycle", self.sql_content)
 
     def test_full_validation_runner(self):
         """Execute full validation suite."""

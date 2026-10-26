@@ -53,16 +53,17 @@ Every field is classified into one of five architectural tiers:
 
 ### 2. `asset_versions`
 - **Purpose**: Immutable snapshot representing a specific content and metadata state of an asset.
-- **Data Grain**: One record per distinct version/content hash of an asset.
+- **Data Grain**: One record per distinct version/content hash of an asset within a tenant boundary.
 - **Primary Key**: `asset_version_id` (UUID).
-- **Foreign Keys**: `asset_id` references `assets(asset_id)` ON DELETE CASCADE.
+- **Foreign Keys**: `(asset_id, tenant_id)` references `assets(asset_id, tenant_id)` ON DELETE CASCADE.
 - **Populating Platforms**: All.
-- **Security / Redaction**: Manifest stores file listings only; no file contents or credentials.
+- **Security / Redaction**: Row Level Security (RLS) enabled. Manifest stores file listings only; no file contents or credentials.
 
 | Column | SQL Type | Nullable | Default | Constraints | Classification | Description & Meaning | Example Values |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `asset_version_id` | UUID | No | `gen_random_uuid()` | PK | Canonical | Unique identifier for the immutable asset version. | `a01b02c0-...` |
 | `asset_id` | UUID | No | None | FK -> `assets` | Canonical | Reference to parent logical asset. | `c1d2e3f4-...` |
+| `tenant_id` | UUID | No | None | FK -> `assets(tenant_id)` | Governance | Tenant boundary identifier for multi-tenant isolation. | `11111111-...` |
 | `version_number` | INTEGER | No | None | UNIQUE (asset_id, version_number) | Operational | Sequential version integer starting at 1. | `1` |
 | `content_hash` | TEXT | No | None | None | Operational | Normalised package content SHA-256 hash. | `'e3b0c44298fc1c...'` |
 | `raw_content_hash` | TEXT | No | None | None | Operational | Raw file binary SHA-256 hash. | `'8f434346648f6b...'` |
@@ -132,19 +133,20 @@ Every field is classified into one of five architectural tiers:
 
 ### 5. `analytical_objects`
 - **Purpose**: Universal polymorphic identity registry for every BI metadata entity across all platforms.
-- **Data Grain**: One record per analytical object (report, visual, table, column, calculation, filter, etc.).
+- **Data Grain**: One record per analytical object (report, visual, table, column, calculation, filter, etc.) within a tenant boundary.
 - **Primary Key**: `object_id` (UUID).
 - **Foreign Keys**:
-  - `asset_version_id` references `asset_versions(asset_version_id)` ON DELETE CASCADE.
+  - `(asset_version_id, tenant_id)` references `asset_versions(asset_version_id, tenant_id)` ON DELETE CASCADE.
   - `parent_object_id` references `analytical_objects(object_id)` ON DELETE CASCADE.
   - `source_artifact_id` references `source_artifacts(source_artifact_id)` ON DELETE SET NULL.
 - **Populating Platforms**: All platforms.
-- **Security / Redaction**: `source_metadata` is sanitized to ensure no credentials or raw data rows are stored.
+- **Security / Redaction**: Row Level Security (RLS) enabled. `source_metadata` is sanitized to ensure no credentials or raw data rows are stored.
 
 | Column | SQL Type | Nullable | Default | Constraints | Classification | Description & Meaning | Example Values |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `object_id` | UUID | No | `gen_random_uuid()` | PK | Canonical | Universal surrogate key for the metadata object. | `f1e2d3c4-...` |
 | `asset_version_id` | UUID | No | None | FK -> `asset_versions` | Canonical | Containing asset version snapshot. | `a01b02c0-...` |
+| `tenant_id` | UUID | No | None | FK -> `asset_versions(tenant_id)` | Governance | Tenant boundary identifier for multi-tenant isolation. | `11111111-...` |
 | `parent_object_id` | UUID | Yes | None | Self-FK -> `analytical_objects` | Canonical | Parent container (e.g. Page for Visual, Table for Col).| `p1a2b3c4-...` |
 | `source_artifact_id`| UUID | Yes | None | FK -> `source_artifacts` | Operational | Originating source file artifact. | `d1e2f3a4-...` |
 | `platform` | TEXT | No | None | CHECK in ('POWER_BI', 'TABLEAU', 'EXCEL', 'THOUGHTSPOT', 'MICROSTRATEGY') | Canonical | Originating platform. | `'POWER_BI'` |
@@ -994,8 +996,17 @@ Every field is classified into one of five architectural tiers:
 | `unit` | TEXT | Yes | None | None | Canonical | Standard unit of measure (`PERCENTAGE`, `USD`, `DAYS`, `RATIO`).|
 | `aggregation_method`| TEXT | Yes | None | None | Canonical | Standard aggregation (`RATIO`, `SUM`, `WEIGHTED_AVERAGE`). |
 | `synonyms` | JSONB | No | `'[]'::jsonb` | None | Canonical | Array of accepted aliases and vernacular terms. |
-| `ontology_payload` | JSONB | No | `'{}'::jsonb` | None | Canonical | Complete verbatim JSON entry from local schema. |
-| `created_at` | TIMESTAMPTZ | No | `clock_timestamp()` | None | Operational | Creation timestamp. |
+| `ontology_payload` | JSONB | No | `'{}'::jsonb` | None | Canonical | Complete verbatim JSON entry from local schema (lossless preservation). |
+| `source_kpi_id` | TEXT | Yes | None | None | Source-Native | Native identifier string from source JSON (e.g. `'INS-CLM-001'`). |
+| `source_sector` | TEXT | Yes | None | None | Source-Native | Native industry sector taxonomy (e.g. `'Insurance'`). |
+| `source_subdomain` | TEXT | Yes | None | None | Source-Native | Native sub-domain classification (e.g. `'Property & Casualty'`). |
+| `source_line_of_business`| TEXT | Yes | None | None | Source-Native | Native LOB classification (e.g. `'Commercial Property'`). |
+| `source_status` | TEXT | Yes | None | None | Source-Native | Native publication status string (e.g. `'Active'`, `'Deprecated'`). |
+| `valid_dimensions` | JSONB | No | `'[]'::jsonb` | None | Canonical | Normalised list of valid analytical dimensions/breakdowns. |
+| `enrichments` | JSONB | No | `'{}'::jsonb` | None | Canonical | Calculated metrics, benchmarks, tags, or operational metadata. |
+| `source_created_at` | TIMESTAMPTZ | Yes | None | None | Source-Native | Native creation timestamp parsed to UTC ISO-8601. |
+| `source_created_by` | TEXT | Yes | None | None | Source-Native | Native author or originating system identifier. |
+| `created_at` | TIMESTAMPTZ | No | `clock_timestamp()` | None | Operational | Database row creation timestamp. |
 
 ---
 
@@ -1018,20 +1029,22 @@ Every field is classified into one of five architectural tiers:
 
 ### 43. `domain_classifications`
 - **Purpose**: Classifications of assets, reports, pages, visuals, and KPI candidates into domains.
-- **Data Grain**: One record per object-to-domain classification.
+- **Data Grain**: One record per object-to-domain classification within a tenant boundary.
 - **Primary Key**: `classification_id` (UUID).
 - **Foreign Keys**:
-  - `asset_version_id` references `asset_versions(asset_version_id)` ON DELETE CASCADE.
-  - `target_object_id` references `analytical_objects(object_id)` ON DELETE CASCADE.
+  - `(target_object_id, asset_version_id)` references `analytical_objects(object_id, asset_version_id)` ON DELETE CASCADE.
+  - `(asset_version_id, tenant_id)` references `asset_versions(asset_version_id, tenant_id)` ON DELETE CASCADE.
   - `domain_id` references `business_domains(domain_id)` ON DELETE CASCADE.
 - **Constraints**:
   - Partial Unique Index on `(asset_version_id, target_object_id)` WHERE `(is_primary = true AND approval_status <> 'REJECTED')`.
 - **Populating Platforms**: All platforms.
+- **Security / Redaction**: Row Level Security (RLS) enabled.
 
 | Column | SQL Type | Nullable | Default | Constraints | Classification | Description & Meaning |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `classification_id`| UUID | No | `gen_random_uuid()` | PK | Canonical | Classification record ID. |
 | `asset_version_id` | UUID | No | None | FK -> `asset_versions` | Canonical | Version snapshot. |
+| `tenant_id` | UUID | No | None | FK -> `asset_versions(tenant_id)` | Governance | Tenant boundary identifier for multi-tenant isolation. |
 | `target_object_id` | UUID | No | None | FK -> `analytical_objects` | Canonical | Classified object (Report, Visual, Measure, Candidate). |
 | `domain_id` | UUID | No | None | FK -> `business_domains` | Canonical | Assigned business domain. |
 | `classification_method`| TEXT| No | None | CHECK in ('LLM', 'DETERMINISTIC', 'HUMAN', 'INHERITED') | Operational | Classification method used. |
@@ -1048,18 +1061,20 @@ Every field is classified into one of five architectural tiers:
 
 ### 44. `kpi_candidates`
 - **Purpose**: Source calculations, measures, or visual cards discovered as potential corporate KPIs.
-- **Data Grain**: One record per discovered KPI candidate.
+- **Data Grain**: One record per discovered KPI candidate within a tenant boundary.
 - **Primary Key**: `kpi_candidate_id` (UUID).
 - **Foreign Keys**:
-  - `asset_version_id` references `asset_versions(asset_version_id)` ON DELETE CASCADE.
-  - `source_object_id` references `analytical_objects(object_id)` ON DELETE CASCADE.
+  - `(asset_version_id, tenant_id)` references `asset_versions(asset_version_id, tenant_id)` ON DELETE CASCADE.
+  - `(source_object_id, asset_version_id)` references `analytical_objects(object_id, asset_version_id)` ON DELETE CASCADE.
   - `business_domain_id` references `business_domains(domain_id)` ON DELETE SET NULL.
 - **Populating Platforms**: All platforms.
+- **Security / Redaction**: Row Level Security (RLS) enabled.
 
 | Column | SQL Type | Nullable | Default | Constraints | Classification | Description & Meaning |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `kpi_candidate_id` | UUID | No | `gen_random_uuid()` | PK | Canonical | Candidate surrogate key. |
 | `asset_version_id` | UUID | No | None | FK -> `asset_versions` | Canonical | Source asset version snapshot. |
+| `tenant_id` | UUID | No | None | FK -> `asset_versions(tenant_id)` | Governance | Tenant boundary identifier for multi-tenant isolation. |
 | `source_object_id` | UUID | No | None | FK -> `analytical_objects` | Canonical | Source calculation, visual, or cell object. |
 | `candidate_name` | TEXT | No | None | None | Canonical | Discovered candidate name. |
 | `candidate_description`| TEXT| Yes | None | None | Canonical | Candidate description or context. |
@@ -1079,17 +1094,19 @@ Every field is classified into one of five architectural tiers:
 
 ### 45. `kpi_mapping_runs`
 - **Purpose**: Batch execution record of ontology matching (LLM or deterministic fallback).
-- **Data Grain**: One record per matching engine invocation run.
+- **Data Grain**: One record per matching engine invocation run within a tenant boundary.
 - **Primary Key**: `mapping_run_id` (UUID).
 - **Foreign Keys**:
-  - `asset_version_id` references `asset_versions(asset_version_id)` ON DELETE CASCADE.
+  - `(asset_version_id, tenant_id)` references `asset_versions(asset_version_id, tenant_id)` ON DELETE CASCADE.
   - `ontology_version_id` references `kpi_ontology_versions(ontology_version_id)` ON DELETE CASCADE.
 - **Populating Platforms**: System Inference Engine.
+- **Security / Redaction**: Row Level Security (RLS) enabled.
 
 | Column | SQL Type | Nullable | Default | Constraints | Classification | Description & Meaning |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `mapping_run_id` | UUID | No | `gen_random_uuid()` | PK | Operational | Mapping run ID. |
 | `asset_version_id` | UUID | No | None | FK -> `asset_versions` | Canonical | Source asset version being evaluated. |
+| `tenant_id` | UUID | No | None | FK -> `asset_versions(tenant_id)` | Governance | Tenant boundary identifier for multi-tenant isolation. |
 | `ontology_version_id`| UUID| No | None | FK -> `kpi_ontology_versions` | Canonical | Target KPI ontology version matched against. |
 | `candidate_generation_version`| TEXT| No| None| None | Operational | Version of candidate generation engine. |
 | `mapping_engine_version`| TEXT| No| None | None | Operational | Version of mapping matching pipeline. |
@@ -1109,21 +1126,24 @@ Every field is classified into one of five architectural tiers:
 
 ### 46. `kpi_mappings`
 - **Purpose**: Current mapping relationship linking a source candidate to the ontology bank.
-- **Data Grain**: One record per candidate mapping state.
+- **Data Grain**: One record per candidate mapping state within a tenant boundary.
 - **Primary Key**: `kpi_mapping_id` (UUID).
 - **Foreign Keys**:
-  - `kpi_candidate_id` references `kpi_candidates(kpi_candidate_id)` ON DELETE CASCADE.
-  - `mapping_run_id` references `kpi_mapping_runs(mapping_run_id)` ON DELETE CASCADE.
-  - `ontology_version_id` references `kpi_ontology_versions(ontology_version_id)` ON DELETE CASCADE.
-  - `selected_ontology_entry_id` references `kpi_ontology_entries(ontology_entry_id)` ON DELETE SET NULL.
+  - `(kpi_candidate_id, asset_version_id)` references `kpi_candidates(kpi_candidate_id, asset_version_id)` ON DELETE CASCADE.
+  - `(mapping_run_id, asset_version_id, ontology_version_id)` references `kpi_mapping_runs(mapping_run_id, asset_version_id, ontology_version_id)` ON DELETE CASCADE.
+  - `(selected_ontology_entry_id, ontology_version_id)` references `kpi_ontology_entries(ontology_entry_id, ontology_version_id)` ON DELETE SET NULL.
 - **Constraints**: CHECK (`top_candidate_count BETWEEN 0 AND 3`).
+- **Triggers**: `trg_protect_human_approval` (prohibits automated overwriting of approved human mappings).
 - **Populating Platforms**: System Inference Engine & Human Governance.
+- **Security / Redaction**: Row Level Security (RLS) enabled.
 
 | Column | SQL Type | Nullable | Default | Constraints | Classification | Description & Meaning |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `kpi_mapping_id` | UUID | No | `gen_random_uuid()` | PK | Canonical | Mapping surrogate key. |
 | `kpi_candidate_id` | UUID | No | None | FK -> `kpi_candidates` | Canonical | Target source KPI candidate. |
 | `mapping_run_id` | UUID | No | None | FK -> `kpi_mapping_runs` | Operational | Executing mapping run. |
+| `tenant_id` | UUID | No | None | FK -> `asset_versions(tenant_id)` | Governance | Tenant boundary identifier for multi-tenant isolation. |
+| `asset_version_id` | UUID | No | None | FK -> `asset_versions` | Canonical | Asset version snapshot context. |
 | `ontology_version_id`| UUID| No | None | FK -> `kpi_ontology_versions` | Canonical | Target ontology version. |
 | `selected_ontology_entry_id`| UUID| Yes| None | FK -> `kpi_ontology_entries` | Canonical | Currently active/selected ontology match. |
 | `mapping_status` | TEXT | No | `'PROPOSED'`| CHECK in ('PROPOSED', 'APPROVED', 'REJECTED', 'OVERRIDDEN', 'UNMAPPED', 'SUPERSEDED') | Governance | Current workflow status. |
@@ -1205,14 +1225,14 @@ Every field is classified into one of five architectural tiers:
 - **Primary Key**: `mapping_review_id` (UUID).
 - **Foreign Keys**:
   - `kpi_mapping_id` references `kpi_mappings(kpi_mapping_id)` ON DELETE CASCADE.
-  - `mapping_candidate_id` references `kpi_mapping_candidates(mapping_candidate_id)` ON DELETE SET NULL.
+  - `(mapping_candidate_id, kpi_mapping_id)` references `kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id)` ON DELETE SET NULL.
 - **Populating Platforms**: Governance Web Application.
 
 | Column | SQL Type | Nullable | Default | Constraints | Classification | Description & Meaning |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `mapping_review_id`| UUID | No | `gen_random_uuid()` | PK | Governance | Review record ID. |
 | `kpi_mapping_id` | UUID | No | None | FK -> `kpi_mappings` | Governance | Reviewed mapping. |
-| `mapping_candidate_id`| UUID| Yes| None | FK -> `kpi_mapping_candidates` | Governance | Candidate reviewed. |
+| `mapping_candidate_id`| UUID| Yes| None | FK -> `kpi_mapping_candidates` | Governance | Candidate reviewed (composite foreign key guarantees mapping alignment). |
 | `reviewer_user_id` | UUID | No | None | None | Governance | User ID of reviewer. |
 | `review_action` | TEXT | No | None | CHECK in ('APPROVE', 'REJECT', 'CHOOSE_ANOTHER', 'ADD_KPI', 'REQUEST_REMAPPING', 'MARK_UNMAPPED') | Governance | Action taken. |
 | `review_status` | TEXT | No | `'COMPLETED'`| CHECK in ('PENDING', 'COMPLETED', 'WITHDRAWN') | Governance | Status of review item. |
@@ -1227,16 +1247,18 @@ Every field is classified into one of five architectural tiers:
 - **Primary Key**: `mapping_approval_id` (UUID).
 - **Foreign Keys**:
   - `kpi_mapping_id` references `kpi_mappings(kpi_mapping_id)` ON DELETE CASCADE.
-  - `approved_mapping_candidate_id` references `kpi_mapping_candidates(mapping_candidate_id)` ON DELETE SET NULL.
+  - `(approved_mapping_candidate_id, kpi_mapping_id)` references `kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id)` ON DELETE SET NULL.
 - **Constraints**:
   - Partial Unique Index on `kpi_mapping_id` WHERE `approval_status = 'APPROVED'` (strictly enforces one active approval per mapping).
+- **Triggers**: Protected via `trg_protect_human_approval` ensuring immutable mapping binding.
 - **Populating Platforms**: Governance Web Application.
+- **Security / Redaction**: Row Level Security (RLS) enabled via parent mapping tenant join.
 
 | Column | SQL Type | Nullable | Default | Constraints | Classification | Description & Meaning |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `mapping_approval_id`| UUID| No | `gen_random_uuid()` | PK | Governance | Approval ledger record ID. |
 | `kpi_mapping_id` | UUID | No | None | FK -> `kpi_mappings`, Partial UNIQUE | Governance | Target mapping. Exactly one active approval permitted. |
-| `approved_mapping_candidate_id`| UUID| Yes| None | FK -> `kpi_mapping_candidates` | Governance | The specific candidate match that was approved. |
+| `approved_mapping_candidate_id`| UUID| Yes| None | FK -> `kpi_mapping_candidates` | Governance | The specific candidate match that was approved (composite FK). |
 | `approved_by_user_id`| UUID| No | None | None | Governance | Authoritative approver user ID. |
 | `approval_status` | TEXT | No | `'APPROVED'` | CHECK in ('APPROVED', 'REVOKED', 'SUPERSEDED') | Governance | Status of approval. |
 | `approval_version` | INTEGER | No | `1` | None | Governance | Approval revision counter. |
@@ -1252,18 +1274,20 @@ Every field is classified into one of five architectural tiers:
 - **Primary Key**: `override_id` (UUID).
 - **Foreign Keys**:
   - `kpi_mapping_id` references `kpi_mappings(kpi_mapping_id)` ON DELETE CASCADE.
-  - `mapping_candidate_id` references `kpi_mapping_candidates(mapping_candidate_id)` ON DELETE SET NULL.
+  - `(mapping_candidate_id, kpi_mapping_id)` references `kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id)` ON DELETE SET NULL.
   - `previous_ontology_entry_id` references `kpi_ontology_entries(ontology_entry_id)` ON DELETE SET NULL.
   - `replacement_ontology_entry_id` references `kpi_ontology_entries(ontology_entry_id)` ON DELETE SET NULL.
   - `supersedes_override_id` references `mapping_overrides(override_id)` ON DELETE SET NULL.
 - **Constraints**: CHECK (`length(trim(override_justification)) > 0`).
+- **Triggers**: `trg_prevent_override_cycle` (prohibits cyclic and self-referencing `supersedes_override_id` chains).
 - **Populating Platforms**: Governance Web Application.
+- **Security / Redaction**: Row Level Security (RLS) enabled via parent mapping tenant join.
 
 | Column | SQL Type | Nullable | Default | Constraints | Classification | Description & Meaning |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `override_id` | UUID | No | `gen_random_uuid()` | PK | Governance | Override surrogate key. |
 | `kpi_mapping_id` | UUID | No | None | FK -> `kpi_mappings` | Governance | Parent mapping. |
-| `mapping_candidate_id`| UUID| Yes| None | FK -> `kpi_mapping_candidates` | Governance | Candidate rejected or replaced. |
+| `mapping_candidate_id`| UUID| Yes| None | FK -> `kpi_mapping_candidates` | Governance | Candidate rejected or replaced (composite FK). |
 | `override_type` | TEXT | No | None | CHECK in ('REJECT', 'SELECT_ALTERNATIVE', 'ADD_KPI', 'FORCE_UNMAPPED', 'REMAP', 'OTHER') | Governance | Action type. |
 | `previous_ontology_entry_id`| UUID| Yes| None| FK -> `kpi_ontology_entries` | Governance | Previously proposed KPI. |
 | `replacement_ontology_entry_id`| UUID| Yes| None| FK -> `kpi_ontology_entries` | Governance | Selected replacement KPI. |
@@ -1273,23 +1297,25 @@ Every field is classified into one of five architectural tiers:
 | `created_by_user_id`| UUID | No | None | None | Governance | Author of override. |
 | `created_at` | TIMESTAMPTZ | No | `clock_timestamp()` | None | Operational | Override timestamp. |
 | `is_active` | BOOLEAN | No | `true` | None | Governance | Active indicator. |
-| `supersedes_override_id`| UUID| Yes| None | Self-FK -> `mapping_overrides` | Governance | Prior override superseded by this record. |
+| `supersedes_override_id`| UUID| Yes| None | Self-FK -> `mapping_overrides` | Governance | Prior override superseded by this record (acyclic trigger-verified). |
 
 ---
 
 ### 52. `metadata_field_reviews`
 - **Purpose**: Human overrides and reviews of specific extracted metadata attributes.
-- **Data Grain**: One record per reviewed metadata attribute path.
+- **Data Grain**: One record per reviewed metadata attribute path within a tenant boundary.
 - **Primary Key**: `field_review_id` (UUID).
 - **Foreign Keys**:
-  - `asset_version_id` references `asset_versions(asset_version_id)` ON DELETE CASCADE.
-  - `target_object_id` references `analytical_objects(object_id)` ON DELETE CASCADE.
+  - `(target_object_id, asset_version_id)` references `analytical_objects(object_id, asset_version_id)` ON DELETE CASCADE.
+  - `(asset_version_id, tenant_id)` references `asset_versions(asset_version_id, tenant_id)` ON DELETE CASCADE.
 - **Populating Platforms**: Governance Web Application.
+- **Security / Redaction**: Row Level Security (RLS) enabled.
 
 | Column | SQL Type | Nullable | Default | Constraints | Classification | Description & Meaning |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `field_review_id` | UUID | No | `gen_random_uuid()` | PK | Governance | Field review ID. |
 | `asset_version_id` | UUID | No | None | FK -> `asset_versions` | Canonical | Asset version snapshot. |
+| `tenant_id` | UUID | No | None | FK -> `asset_versions(tenant_id)` | Governance | Tenant boundary identifier for multi-tenant isolation. |
 | `target_object_id` | UUID | No | None | FK -> `analytical_objects` | Canonical | Target object whose metadata was corrected. |
 | `field_path` | TEXT | No | None | None | Canonical | Dot-notated attribute path (`canonical_name`, `description`).|
 | `source_value_hash`| TEXT | No | None | None | Operational | Hash of raw extracted value. |
@@ -1402,17 +1428,19 @@ Every field is classified into one of five architectural tiers:
 
 ### 57. `parser_runs`
 - **Purpose**: Execution logs of platform-specific metadata parsing adapters.
-- **Data Grain**: One record per parser execution on a version or artifact.
+- **Data Grain**: One record per parser execution on a version or artifact within a tenant boundary.
 - **Primary Key**: `parser_run_id` (UUID).
 - **Foreign Keys**:
-  - `asset_version_id` references `asset_versions(asset_version_id)` ON DELETE CASCADE.
+  - `(asset_version_id, tenant_id)` references `asset_versions(asset_version_id, tenant_id)` ON DELETE CASCADE.
   - `source_artifact_id` references `source_artifacts(source_artifact_id)` ON DELETE SET NULL.
 - **Populating Platforms**: Platform Metadata Adapters.
+- **Security / Redaction**: Row Level Security (RLS) enabled.
 
 | Column | SQL Type | Nullable | Default | Constraints | Classification | Description & Meaning |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `parser_run_id` | UUID | No | `gen_random_uuid()` | PK | Operational | Execution record ID. |
 | `asset_version_id` | UUID | No | None | FK -> `asset_versions` | Canonical | Asset version parsed. |
+| `tenant_id` | UUID | No | None | FK -> `asset_versions(tenant_id)` | Governance | Tenant boundary identifier for multi-tenant isolation. |
 | `source_artifact_id`| UUID | Yes | None | FK -> `source_artifacts` | Operational | Sub-artifact parsed if file-scoped. |
 | `platform` | TEXT | No | None | None | Canonical | Platform adapter executed. |
 | `parser_name` | TEXT | No | None | None | Operational | Adapter class name (`PowerBiPbipAdapter`, `TableauXmlAdapter`).|
@@ -1472,15 +1500,19 @@ Every field is classified into one of five architectural tiers:
 
 ### 60. `mapping_audit_events`
 - **Purpose**: Complete immutable audit trail of state transitions in the mapping lifecycle.
-- **Data Grain**: One record per mapping state change event.
+- **Data Grain**: One record per mapping state change event within a tenant boundary.
 - **Primary Key**: `mapping_audit_event_id` (UUID).
-- **Foreign Keys**: `kpi_mapping_id` references `kpi_mappings(kpi_mapping_id)` ON DELETE CASCADE.
+- **Foreign Keys**: `kpi_mapping_id` references `kpi_mappings(kpi_mapping_id)` ON DELETE RESTRICT (prohibits parent cascade deletion).
+- **Triggers**: Protected via `trg_mapping_audit_immutable` (strictly prohibits UPDATE and DELETE mutations).
 - **Populating Platforms**: All Governance and Inference services.
+- **Security / Redaction**: Row Level Security (RLS) enabled.
 
 | Column | SQL Type | Nullable | Default | Constraints | Classification | Description & Meaning |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `mapping_audit_event_id`| UUID| No| `gen_random_uuid()` | PK | Governance | Audit event record ID. |
-| `kpi_mapping_id` | UUID | No | None | FK -> `kpi_mappings` | Governance | Target mapping. |
+| `tenant_id` | UUID | No | None | None | Governance | Tenant boundary identifier for multi-tenant isolation. |
+| `kpi_mapping_id` | UUID | Yes| None | FK -> `kpi_mappings` ON DELETE RESTRICT | Governance | Current mapping reference (nullable if parent archived). |
+| `target_kpi_mapping_id`| UUID | No | None | None | Governance | Immutable mapping snapshot key (persists even if mapping row changes). |
 | `actor_user_id` | UUID | No | None | None | Governance | User or system agent who initiated the state change. |
 | `event_type` | TEXT | No | None | None | Governance | Transition type (`CREATED`, `PROPOSED`, `APPROVED`, `OVERRIDDEN`).|
 | `previous_state` | JSONB | No | `'{}'::jsonb` | None | Governance | Complete serialized snapshot of prior mapping state. |
@@ -1495,14 +1527,15 @@ Every field is classified into one of five architectural tiers:
 - **Data Grain**: One record per change applied to the local ontology.
 - **Primary Key**: `ontology_change_event_id` (UUID).
 - **Foreign Keys**:
-  - `ontology_version_id` references `kpi_ontology_versions(ontology_version_id)` ON DELETE CASCADE.
+  - `ontology_version_id` references `kpi_ontology_versions(ontology_version_id)` ON DELETE RESTRICT (prohibits cascade deletion).
   - `ontology_entry_id` references `kpi_ontology_entries(ontology_entry_id)` ON DELETE SET NULL.
+- **Triggers**: Protected via `trg_ontology_audit_immutable` (strictly prohibits UPDATE and DELETE mutations).
 - **Populating Platforms**: Local Ontology Management Service.
 
 | Column | SQL Type | Nullable | Default | Constraints | Classification | Description & Meaning |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | `ontology_change_event_id`| UUID| No| `gen_random_uuid()` | PK | Governance | Event surrogate key. |
-| `ontology_version_id`| UUID| No | None | FK -> `kpi_ontology_versions` | Governance | Affected ontology version. |
+| `ontology_version_id`| UUID| No | None | FK -> `kpi_ontology_versions` ON DELETE RESTRICT | Governance | Affected ontology version (protected against deletion). |
 | `ontology_entry_id`| UUID | Yes | None | FK -> `kpi_ontology_entries` | Governance | Affected KPI entry if applicable. |
 | `actor_user_id` | UUID | No | None | None | Governance | User who authored or authorized the change. |
 | `change_type` | TEXT | No | None | CHECK in ('ADD', 'UPDATE', 'DEPRECATE', 'RESTORE', 'IMPORT') | Governance | Nature of change. |
