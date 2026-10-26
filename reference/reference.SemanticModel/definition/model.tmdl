@@ -1,0 +1,39 @@
+model Model
+	culture: nl-NL
+	defaultPowerBIDataSourceVersion: powerBI_V3
+	discourageImplicitMeasures
+	sourceQueryCulture: nl-NL
+	dataAccessOptions
+		legacyRedirects
+		returnErrorValuesAsNull
+
+annotation PBIDesktopVersion = 2.143.878.0 (25.05)+b20aa3b866ec1b70879135a4e60e4b1301c75b21
+
+annotation __PBI_TimeIntelligenceEnabled = 0
+
+annotation PBI_QueryOrder = ["categorie","klant","produkt","verkoop","_Measures_base","Query1","Datum tabel","_Measures_layout","_Measures_DAX","Invoked Function"]
+
+annotation __TEdtr = 1
+
+annotation PBI_ProTooling = ["CalcGroup","DaxQueryView_Desktop","TMDLView_Desktop","DevMode"]
+
+annotation TabularEditor_SerializeOptions = {"IgnoreInferredObjects":true,"IgnoreInferredProperties":true,"IgnoreTimestamps":true,"SplitMultilineStrings":true,"PrefixFilenames":false,"LocalTranslations":true,"LocalPerspectives":true,"LocalRelationships":true,"Levels":["Data Sources","Perspectives","Relationships","Roles","Shared Expressions","Tables","Tables/Calculation Items","Tables/CalculationItems","Tables/Columns","Tables/Hierarchies","Tables/Measures","Tables/Partitions","Translations"]}
+
+ref table categorie
+ref table klant
+ref table produkt
+ref table verkoop
+ref table _Measures_base
+ref table _Field_param_product
+ref table 'Datum tabel'
+ref table _INFO_columns
+ref table _INFO_relationships
+ref table _INFO_tables
+ref table _INFO_measures
+ref table _Measures_layout
+ref table _Measures_DAX
+ref table 'Calc group Time intelligence'
+ref table 'Invoked Function'
+
+ref cultureInfo nl-NL
+

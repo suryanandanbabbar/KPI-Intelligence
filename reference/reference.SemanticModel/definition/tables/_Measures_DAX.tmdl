@@ -1,0 +1,21 @@
+table _Measures_DAX
+	lineageTag: d0479354-e6d1-413d-95df-0d8887161285
+
+	column 1
+		dataType: string
+		lineageTag: a4d28378-8448-4d18-8e98-ebcd38c96209
+		summarizeBy: none
+		sourceColumn: 1
+
+		annotation SummarizationSetBy = Automatic
+
+	partition _Measures_DAX = m
+		mode: import
+		source =
+				let
+				    Source = Table.FromRows(Json.Document(Binary.Decompress(Binary.FromText("i45WMlSKjQUA", BinaryEncoding.Base64), Compression.Deflate)), let _t = ((type nullable text) meta [Serialized.Text = true]) in type table [#"1" = _t])
+				in
+				    Source
+
+	annotation PBI_ResultType = Table
+

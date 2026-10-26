@@ -1,0 +1,49 @@
+table _Field_param_product
+	lineageTag: fd7efb8f-b1d9-4817-a306-aeff8ce48cb6
+
+	column dimensiekeuze
+		lineageTag: 3c146bbb-da38-42a5-87c1-b962a5f3523c
+		summarizeBy: none
+		sourceColumn: [Value1]
+		sortByColumn: 'dimensiekeuze Order'
+
+		relatedColumnDetails
+			groupByColumn: 'dimensiekeuze Fields'
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'dimensiekeuze Fields'
+		isHidden
+		lineageTag: 8e4cf91c-941a-46df-97c1-c8e070c5a14e
+		summarizeBy: none
+		sourceColumn: [Value2]
+		sortByColumn: 'dimensiekeuze Order'
+
+		extendedProperty ParameterMetadata =
+				{
+				  "version": 3,
+				  "kind": 2
+				}
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'dimensiekeuze Order'
+		isHidden
+		formatString: 0
+		lineageTag: a085ea9a-4eed-4a46-ac18-2dc931ae05a7
+		summarizeBy: sum
+		sourceColumn: [Value3]
+
+		annotation SummarizationSetBy = Automatic
+
+	partition _Field_param_product = calculated
+		mode: import
+		source =
+				{
+				    ("prod naam", NAMEOF('produkt'[prod naam]), 0),
+				    ("produkt kleur", NAMEOF('produkt'[produkt kleur]), 1),
+				    ("cat naam", NAMEOF('categorie'[cat naam]), 2)
+				}
+
+	annotation PBI_Id = d6ca3ebbb22c4d4b8a33adeffcf02f9e
+

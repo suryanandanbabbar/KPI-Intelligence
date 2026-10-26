@@ -1,0 +1,44 @@
+table _Measures_base
+	lineageTag: 72740502-afe3-4e04-8d94-9e503ac3bcb5
+
+	measure Omzet = SUMX(verkoop,verkoop[aantal]*RELATED(produkt[prijs]))
+		formatString: 0
+		lineageTag: d7dc165d-3ac5-4d78-b960-9b9ba2d831dc
+
+		annotation PBI_FormatHint = {"isDecimal":true}
+
+	measure '# verkopen' = SUM(verkoop[aantal])
+		formatString: 0
+		lineageTag: 53bc2081-d925-4e5a-8d9e-ccbe7acf40a1
+
+	measure 'avg verkopen' = AVERAGE(verkoop[aantal])
+		lineageTag: 7df859f8-46ff-45ea-8699-66ac585f6707
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	measure '# bestellingen' = COUNTROWS(verkoop)
+		lineageTag: 04520538-64c5-4304-8edc-d7dabbbec076
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column 'Kolom 1'
+		dataType: string
+		isHidden
+		lineageTag: 7bb5a660-1824-429b-ab76-3a6af82c289d
+		summarizeBy: none
+		sourceColumn: Kolom 1
+
+		changedProperty = IsHidden
+
+		annotation SummarizationSetBy = Automatic
+
+	partition _Measures_base-c3d850b8-4a36-40da-b21f-a7d60c14417d = m
+		mode: import
+		source =
+				let
+				    Bron = Table.FromRows(Json.Document(Binary.Decompress(Binary.FromText("i45WMlSKjQUA", BinaryEncoding.Base64), Compression.Deflate)), let _t = ((type nullable text) meta [Serialized.Text = true]) in type table [#"Kolom 1" = _t])
+				in
+				    Bron
+
+	annotation PBI_ResultType = Table
+

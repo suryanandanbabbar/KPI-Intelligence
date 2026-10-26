@@ -1,0 +1,16 @@
+relationship c93ab1f6-081c-4ac7-b33d-37ef17bc8131
+	fromColumn: verkoop.klantkey
+	toColumn: klant.key
+
+relationship 3f972183-b583-4327-adf0-495ca16b2fc7
+	fromColumn: verkoop.productkey
+	toColumn: produkt.key
+
+relationship 1a22d14d-2d47-4291-a99a-40f00f8b5546
+	fromColumn: produkt.categoriekey
+	toColumn: categorie.key
+
+relationship d3c2b30c-c192-c5a6-bbdb-2de2136141c9
+	fromColumn: verkoop.orderdate
+	toColumn: 'Datum tabel'.Date
+

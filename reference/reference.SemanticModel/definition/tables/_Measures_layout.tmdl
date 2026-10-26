@@ -1,0 +1,41 @@
+table _Measures_layout
+	lineageTag: 398894c4-02f7-421e-83fe-85bc2de629c2
+
+	measure 'Hide visuals selection filter categorie' = IF(ISFILTERED(categorie[cat naam]),1,0)
+		lineageTag: ee1ef9c1-3edd-4621-a931-e04e4959410c
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	measure 'Hide visuals mask_transparency' = IF([Hide visuals selection filter categorie],"#FFFFFF00","FFFFFF")
+		lineageTag: 64220109-4b87-4f31-b885-67d7c62e3d15
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	measure 'Hide visuals make_transparent_word' = IF([Hide visuals selection filter categorie],"#FFFFFF00","#2864AC")
+		lineageTag: f0dfabd0-9c50-410e-a2f9-0b1b8d1257b3
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	measure 'Hide visuals text' = "Please choose a category to display data."
+		lineageTag: 050f1c75-fb67-4971-87cb-3830428cffbf
+
+		annotation PBI_FormatHint = {"isText":true}
+
+	column Column1
+		dataType: string
+		lineageTag: 51407968-e439-4d8d-a0ec-b8942eb995b3
+		summarizeBy: none
+		sourceColumn: Column1
+
+		annotation SummarizationSetBy = Automatic
+
+	partition _Measures_layout = m
+		mode: import
+		source =
+				let
+				    Source = Table.FromRows(Json.Document(Binary.Decompress(Binary.FromText("i45WMlSKjQUA", BinaryEncoding.Base64), Compression.Deflate)), let _t = ((type nullable text) meta [Serialized.Text = true]) in type table [Column1 = _t])
+				in
+				    Source
+
+	annotation PBI_ResultType = Table
+

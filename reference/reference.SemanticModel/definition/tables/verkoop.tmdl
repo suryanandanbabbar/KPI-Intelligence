@@ -1,0 +1,101 @@
+table verkoop
+	lineageTag: 01391e01-0ba4-417d-b23b-19a966f2546c
+
+	column key
+		dataType: int64
+		formatString: 0
+		lineageTag: 4fe6cb7b-4654-4d5f-aeb8-d09a734272dd
+		summarizeBy: sum
+		sourceColumn: key
+
+		changedProperty = SortByColumn
+
+		annotation SummarizationSetBy = Automatic
+
+	column klantkey
+		dataType: int64
+		formatString: 0
+		lineageTag: c4e4bede-8684-43f4-baed-68312ebcad8e
+		summarizeBy: none
+		sourceColumn: klantkey
+
+		annotation SummarizationSetBy = Automatic
+
+	column productkey
+		dataType: int64
+		formatString: 0
+		lineageTag: da24327e-5c5b-47cc-8cbd-e98ee93f793a
+		summarizeBy: none
+		sourceColumn: productkey
+
+		annotation SummarizationSetBy = Automatic
+
+	column aantal
+		dataType: int64
+		formatString: 0
+		lineageTag: 477471a5-12d8-486d-877f-a79cf48df95f
+		summarizeBy: sum
+		sourceColumn: aantal
+
+		annotation SummarizationSetBy = Automatic
+
+	column korting
+		dataType: double
+		formatString: 0.00%;-0.00%;0.00%
+		lineageTag: 0019f68d-4977-4965-a67d-858685e254d9
+		summarizeBy: sum
+		sourceColumn: korting
+
+		changedProperty = FormatString
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Prijs product' = RELATED(produkt[prijs])
+		lineageTag: 49007081-10d7-40b0-88bf-2c624783b96d
+		summarizeBy: sum
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column orderdate
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: 51537c83-7ba1-48b0-8877-840eb00ec19f
+		summarizeBy: none
+		sourceColumn: orderdate
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	column deliverydate
+		dataType: dateTime
+		formatString: Short Date
+		lineageTag: 0104e19b-d347-4a47-9a36-1468c9d9af0c
+		summarizeBy: none
+		sourceColumn: deliverydate
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	partition verkoop-4ea753a0-0d10-4735-a679-3a5a2097f512 = m
+		mode: import
+		source =
+				let
+				    Source = Excel.Workbook(File.Contents("C:\PBI\PBIX oefen per onderwerp\Oefen eigen bron.xlsx"), null, true),
+				    verkoop_Table = Source{[Item="verkoop",Kind="Table"]}[Data],
+				    #"Changed Type" = Table.TransformColumnTypes(verkoop_Table,{{"key", Int64.Type}, {"klantkey", Int64.Type}, {"productkey", Int64.Type}, {"orderdate", type date}, {"deliverykey", type date}, {"aantal", Int64.Type}, {"korting", type number}}),
+				    #"Removed Columns" = Table.RemoveColumns(#"Changed Type",{"prijs"}),
+				    #"Index toegevoegd" = Table.AddIndexColumn(#"Removed Columns", "Index", 1, 1, Int64.Type),
+				    #"Namen van kolommen gewijzigd" = Table.RenameColumns(#"Index toegevoegd",{{"Index", "Ordernummer"}}),
+				    #"Kolommen verwijderd" = Table.RemoveColumns(#"Namen van kolommen gewijzigd",{"Ordernummer"}),
+				    #"Renamed Columns" = Table.RenameColumns(#"Kolommen verwijderd",{{"deliverykey", "deliverydate"}})
+				in
+				    #"Renamed Columns"
+
+	annotation PBI_ResultType = Table
+
+	annotation PBI_NavigationStepName = Navigation
+

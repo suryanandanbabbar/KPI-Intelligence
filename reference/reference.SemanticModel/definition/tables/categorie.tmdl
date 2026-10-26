@@ -1,0 +1,53 @@
+table categorie
+	lineageTag: a12beb4d-d2ca-43d7-a855-e390a31ccf34
+
+	column key
+		dataType: int64
+		formatString: 0
+		lineageTag: 7fddf4f7-6872-4153-96d0-03fcb5b4c74b
+		summarizeBy: none
+		sourceColumn: key
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'cat naam'
+		dataType: string
+		lineageTag: 525393a3-f6d2-4c27-ab10-e638e0fd4849
+		summarizeBy: none
+		sourceColumn: cat naam
+
+		annotation SummarizationSetBy = Automatic
+
+	column Foto
+		dataType: string
+		lineageTag: 085f2f59-80c5-497b-a110-fd54a499f8e3
+		dataCategory: ImageUrl
+		summarizeBy: none
+		sourceColumn: Foto
+
+		annotation SummarizationSetBy = Automatic
+
+	column Samengevoegd
+		dataType: string
+		lineageTag: e73c9320-c7e1-4c5b-b668-0fc78ab35139
+		summarizeBy: none
+		sourceColumn: Samengevoegd
+
+		annotation SummarizationSetBy = Automatic
+
+	partition categorie-3e88b2cb-87fc-449a-855d-ce2528cc6b3f = m
+		mode: import
+		source =
+				let
+				    Source = Excel.Workbook(File.Contents("C:\PBI\PBIX oefen per onderwerp\Oefen eigen bron.xlsx"), null, true),
+				    categorie_Table = Source{[Item="categorie",Kind="Table"]}[Data],
+				    #"Changed Type" = Table.TransformColumnTypes(categorie_Table,{{"key", Int64.Type}, {"naam", type text}}),
+				    #"Renamed Columns" = Table.RenameColumns(#"Changed Type",{{"naam", "cat naam"}}),
+				    #"Samengevoegde kolom ingevoegd" = Table.AddColumn(#"Renamed Columns", "Samengevoegd", each Text.Combine({"https://d3p", Text.From([key], "nl-NL"), "3q7ms5uo8z.cloudfront.net/media/image/9", Text.From([key], "nl-NL"), "/ff/e0/Model-Lena-Gercke-PS", Text.From([key], "nl-NL"), "42q3DtN6K8SzrTr_600x600.jpg"}), type text)
+				in
+				    #"Samengevoegde kolom ingevoegd"
+
+	annotation PBI_ResultType = Table
+
+	annotation PBI_NavigationStepName = Navigation
+

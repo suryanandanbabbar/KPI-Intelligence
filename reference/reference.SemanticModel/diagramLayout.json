@@ -1,0 +1,206 @@
+{
+  "version": "1.1.0",
+  "diagrams": [
+    {
+      "ordinal": 0,
+      "scrollPosition": {
+        "x": 74.78927086139548,
+        "y": 0
+      },
+      "nodes": [
+        {
+          "location": {
+            "x": 0,
+            "y": 298.85057471264366
+          },
+          "nodeIndex": "categorie",
+          "size": {
+            "height": 187,
+            "width": 254
+          },
+          "zIndex": 20
+        },
+        {
+          "location": {
+            "x": 658.6810804597701,
+            "y": 0
+          },
+          "nodeIndex": "klant",
+          "size": {
+            "height": 301.89655172413796,
+            "width": 262
+          },
+          "zIndex": 22
+        },
+        {
+          "location": {
+            "x": 329.90381056766557,
+            "y": 221.31639134572879
+          },
+          "nodeIndex": "produkt",
+          "size": {
+            "height": 606.54022988505733,
+            "width": 254
+          },
+          "zIndex": 23
+        },
+        {
+          "location": {
+            "x": 727.82202298850564,
+            "y": 472.15316731770832
+          },
+          "nodeIndex": "verkoop",
+          "size": {
+            "height": 561.66666666666674,
+            "width": 262
+          },
+          "zIndex": 28
+        },
+        {
+          "location": {
+            "x": 1089.9167688128589,
+            "y": 234.72600894621053
+          },
+          "nodeIndex": "Datum tabel",
+          "nodeLineageTag": "6818d31f-488d-4707-90de-962214392ca8",
+          "size": {
+            "height": 300,
+            "width": 234
+          },
+          "zIndex": 0
+        },
+        {
+          "location": {
+            "x": 2053.7,
+            "y": 440.9099169921875
+          },
+          "nodeIndex": "_Field_param_product",
+          "size": {
+            "height": 152,
+            "width": 234
+          },
+          "zIndex": 0
+        },
+        {
+          "location": {
+            "x": 2337.7,
+            "y": 416.9099169921875
+          },
+          "nodeIndex": "_INFO_columns",
+          "size": {
+            "height": 200,
+            "width": 234
+          },
+          "zIndex": 0
+        },
+        {
+          "location": {
+            "x": 2621.7,
+            "y": 416.9099169921875
+          },
+          "nodeIndex": "_INFO_relationships",
+          "size": {
+            "height": 200,
+            "width": 234
+          },
+          "zIndex": 0
+        },
+        {
+          "location": {
+            "x": 2905.7,
+            "y": 416.9099169921875
+          },
+          "nodeIndex": "_INFO_tables",
+          "size": {
+            "height": 200,
+            "width": 234
+          },
+          "zIndex": 0
+        },
+        {
+          "location": {
+            "x": 3189.7,
+            "y": 416.9099169921875
+          },
+          "nodeIndex": "_INFO_measures",
+          "size": {
+            "height": 200,
+            "width": 234
+          },
+          "zIndex": 0
+        },
+        {
+          "location": {
+            "x": 1485.7,
+            "y": 0
+          },
+          "nodeIndex": "_Measures_base",
+          "size": {
+            "height": 104,
+            "width": 234
+          },
+          "zIndex": 0
+        },
+        {
+          "location": {
+            "x": 3473.7,
+            "y": 464.9099169921875
+          },
+          "nodeIndex": "_Measures_layout",
+          "nodeLineageTag": "398894c4-02f7-421e-83fe-85bc2de629c2",
+          "size": {
+            "height": 104,
+            "width": 234
+          },
+          "zIndex": 0
+        },
+        {
+          "location": {
+            "x": 4041.7,
+            "y": 464.9099169921875
+          },
+          "nodeIndex": "_Measures_DAX",
+          "size": {
+            "height": 104,
+            "width": 234
+          },
+          "zIndex": 0
+        },
+        {
+          "location": {
+            "x": 4325.7,
+            "y": 452.9099169921875
+          },
+          "nodeIndex": "Calc group Time intelligence",
+          "nodeLineageTag": "23fc66f7-8af6-4df4-91bd-4b7b5188b465",
+          "size": {
+            "height": 128,
+            "width": 234
+          },
+          "zIndex": 0
+        },
+        {
+          "location": {
+            "x": 4609.7,
+            "y": 366.9099169921875
+          },
+          "nodeIndex": "Invoked Function",
+          "nodeLineageTag": "72ce1d25-6e5e-494f-865e-29b0c3d8719e",
+          "size": {
+            "height": 300,
+            "width": 234
+          },
+          "zIndex": 0
+        }
+      ],
+      "name": "All tables",
+      "zoomValue": 87,
+      "pinKeyFieldsToTop": false,
+      "showExtraHeaderInfo": false,
+      "hideKeyFieldsWhenCollapsed": false,
+      "tablesLocked": false
+    }
+  ],
+  "selectedDiagram": "All tables",
+  "defaultDiagram": "All tables"
+}

@@ -1,0 +1,508 @@
+table 'Datum tabel'
+	lineageTag: 6818d31f-488d-4707-90de-962214392ca8
+	dataCategory: Time
+
+	column Date
+		dataType: dateTime
+		isKey
+		formatString: Short Date
+		lineageTag: df0fa3e4-54b1-4a01-8256-53dccde2b8dd
+		summarizeBy: none
+		sourceColumn: Date
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	column Year
+		dataType: int64
+		formatString: 0
+		lineageTag: 4ce06394-cff6-4710-a3e5-63ced2cc6e61
+		summarizeBy: none
+		sourceColumn: Year
+
+		annotation SummarizationSetBy = Automatic
+
+	column YearOffset
+		dataType: int64
+		formatString: 0
+		lineageTag: fb732f4d-7778-4c11-b5e8-1a78b111a038
+		summarizeBy: none
+		sourceColumn: YearOffset
+
+		annotation SummarizationSetBy = Automatic
+
+	column YearCompleted
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: b2c7e632-4acf-4bee-8370-838145dd5bda
+		summarizeBy: none
+		sourceColumn: YearCompleted
+
+		annotation SummarizationSetBy = Automatic
+
+	column QuarterOfYear
+		dataType: int64
+		formatString: 0
+		lineageTag: 4fcedf32-a0b6-42b5-9480-0ce702c5c26c
+		summarizeBy: none
+		sourceColumn: QuarterOfYear
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Quarter & Year'
+		dataType: string
+		lineageTag: 6ef65adb-21af-4754-b917-69ddc6941c31
+		summarizeBy: none
+		sourceColumn: Quarter & Year
+
+		annotation SummarizationSetBy = Automatic
+
+	column QuarternYear
+		dataType: int64
+		formatString: 0
+		lineageTag: 7cc79915-08b1-4c93-b515-88fb68f3672c
+		summarizeBy: none
+		sourceColumn: QuarternYear
+
+		annotation SummarizationSetBy = Automatic
+
+	column QuarterOffset
+		dataType: int64
+		formatString: 0
+		lineageTag: 8305e2a6-1553-4508-b49c-a82938c2e377
+		summarizeBy: none
+		sourceColumn: QuarterOffset
+
+		annotation SummarizationSetBy = Automatic
+
+	column QuarterCompleted
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: d6731582-08a4-4a23-94b2-3eefb817e63e
+		summarizeBy: none
+		sourceColumn: QuarterCompleted
+
+		annotation SummarizationSetBy = Automatic
+
+	column MonthOfYear
+		dataType: int64
+		formatString: 0
+		lineageTag: e6cfbe09-4b63-4e97-8bd7-5d03e646d4c5
+		summarizeBy: none
+		sourceColumn: MonthOfYear
+
+		annotation SummarizationSetBy = Automatic
+
+	column DayOfMonth
+		dataType: int64
+		formatString: 0
+		lineageTag: 6b12ca34-2acc-4bd6-a32b-385c6621b9b1
+		summarizeBy: none
+		sourceColumn: DayOfMonth
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Month Name'
+		dataType: string
+		lineageTag: 84bcd0b9-d201-4760-b203-6113584effeb
+		summarizeBy: none
+		sourceColumn: Month Name
+
+		annotation SummarizationSetBy = Automatic
+
+	column MonthShortName
+		dataType: string
+		lineageTag: 9b5505fb-2c5b-4a06-a970-ab5a16124f6c
+		summarizeBy: none
+		sourceColumn: MonthShortName
+		sortByColumn: MonthOfYear
+
+		changedProperty = SortByColumn
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Month Initial'
+		dataType: string
+		lineageTag: 14ac6171-176d-42cf-b837-05057182652f
+		summarizeBy: none
+		sourceColumn: Month Initial
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Month & Year'
+		dataType: string
+		lineageTag: 9c395d38-d0d7-41e8-b908-bf1e60f0c427
+		summarizeBy: none
+		sourceColumn: Month & Year
+
+		annotation SummarizationSetBy = Automatic
+
+	column MonthnYear
+		dataType: int64
+		formatString: 0
+		lineageTag: 5c913328-0d5b-4849-a718-ce0a4726ab71
+		summarizeBy: none
+		sourceColumn: MonthnYear
+
+		annotation SummarizationSetBy = Automatic
+
+	column MonthOffset
+		dataType: int64
+		formatString: 0
+		lineageTag: b1c35ffe-9a72-465f-800e-efaa76fb0bab
+		summarizeBy: none
+		sourceColumn: MonthOffset
+
+		annotation SummarizationSetBy = Automatic
+
+	column MonthCompleted
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: 1feee720-d2de-40e3-bffb-dbb3b8e6ac18
+		summarizeBy: none
+		sourceColumn: MonthCompleted
+
+		annotation SummarizationSetBy = Automatic
+
+	column MonthEnding
+		dataType: dateTime
+		formatString: Long Date
+		lineageTag: 5cc29af4-d869-4a3a-8bc0-fc6cad200e61
+		summarizeBy: none
+		sourceColumn: MonthEnding
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	column DateInt
+		dataType: int64
+		formatString: 0
+		lineageTag: a0cab739-6639-467a-875b-366fbeae0694
+		summarizeBy: none
+		sourceColumn: DateInt
+
+		annotation SummarizationSetBy = Automatic
+
+	column DayOfWeek
+		dataType: int64
+		formatString: 0
+		lineageTag: 65a70f28-8c17-4484-9fc3-b1b4cbe5fa2c
+		summarizeBy: none
+		sourceColumn: DayOfWeek
+
+		annotation SummarizationSetBy = Automatic
+
+	column DayOfWeekName
+		dataType: string
+		lineageTag: 3e6ba1a5-85a7-4852-b529-1a1532e62018
+		summarizeBy: none
+		sourceColumn: DayOfWeekName
+		sortByColumn: DayOfWeek
+
+		changedProperty = SortByColumn
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Weekday Initial'
+		dataType: string
+		lineageTag: 63e81e6c-29c4-473a-a45a-9d475b6711d5
+		summarizeBy: none
+		sourceColumn: Weekday Initial
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Day Type'
+		dataType: string
+		lineageTag: a4b67f79-ab91-40e4-b78a-3a9c031347a1
+		summarizeBy: none
+		sourceColumn: Day Type
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'ISO Year'
+		dataType: int64
+		formatString: 0
+		lineageTag: b01e0f66-bdaf-4762-94ac-63d3d5d9d3a6
+		summarizeBy: none
+		sourceColumn: ISO Year
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'ISO YearOffset'
+		dataType: int64
+		formatString: 0
+		lineageTag: 684f233c-ba57-49a2-9cf4-682eb08fd6dc
+		summarizeBy: none
+		sourceColumn: ISO YearOffset
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'ISO QuarterOfYear'
+		dataType: int64
+		formatString: 0
+		lineageTag: 9fdc4c5d-bbd0-45b5-80e4-a55f692db084
+		summarizeBy: none
+		sourceColumn: ISO QuarterOfYear
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'ISO Quarter'
+		dataType: string
+		lineageTag: 5447869a-6355-4878-9f7a-fde8ce1814f0
+		summarizeBy: none
+		sourceColumn: ISO Quarter
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'ISO Quarter & Year'
+		dataType: string
+		lineageTag: a4fc2f5a-3372-430f-bf1e-474e070f6b54
+		summarizeBy: none
+		sourceColumn: ISO Quarter & Year
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'ISO QuarternYear'
+		dataType: int64
+		formatString: 0
+		lineageTag: 59370963-8402-42ab-98c0-f7062074f987
+		summarizeBy: none
+		sourceColumn: ISO QuarternYear
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'ISO QuarterOffset'
+		dataType: int64
+		formatString: 0
+		lineageTag: 05db4e01-a7c4-42f1-837a-b0f353453aa4
+		summarizeBy: none
+		sourceColumn: ISO QuarterOffset
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'ISO Weeknumber'
+		dataType: int64
+		formatString: 0
+		lineageTag: 15ee1db6-381c-43d1-86e6-56aa1cde2f57
+		summarizeBy: none
+		sourceColumn: ISO Weeknumber
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Week & Year'
+		dataType: string
+		lineageTag: fcb12b37-adb3-4a52-a5cb-0fb96668a631
+		summarizeBy: none
+		sourceColumn: Week & Year
+
+		annotation SummarizationSetBy = Automatic
+
+	column WeeknYear
+		dataType: int64
+		formatString: 0
+		lineageTag: 4ab73447-d52d-4859-a6be-14e43940622f
+		summarizeBy: none
+		sourceColumn: WeeknYear
+
+		annotation SummarizationSetBy = Automatic
+
+	column WeekOffset
+		dataType: int64
+		formatString: 0
+		lineageTag: 5bad30b0-d0aa-4702-90e7-1639f7abf11d
+		summarizeBy: none
+		sourceColumn: WeekOffset
+
+		annotation SummarizationSetBy = Automatic
+
+	column WeekCompleted
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: 36a0a57b-b9a5-4354-8e76-7fd663c58547
+		summarizeBy: none
+		sourceColumn: WeekCompleted
+
+		annotation SummarizationSetBy = Automatic
+
+	column WeekEnding
+		dataType: dateTime
+		formatString: Long Date
+		lineageTag: 679a5b60-efbd-4ed7-9326-0f4716f79ea3
+		summarizeBy: none
+		sourceColumn: WeekEnding
+
+		annotation SummarizationSetBy = Automatic
+
+		annotation UnderlyingDateTimeDataType = Date
+
+	column 'Fiscal Year'
+		dataType: string
+		lineageTag: 364fe350-2508-46df-8265-50c5d4f24cb2
+		summarizeBy: none
+		sourceColumn: Fiscal Year
+
+		annotation SummarizationSetBy = Automatic
+
+	column FiscalYearOffset
+		dataType: int64
+		formatString: 0
+		lineageTag: 30de3974-83b4-42b4-887c-58211bbf1e09
+		summarizeBy: none
+		sourceColumn: FiscalYearOffset
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Fiscal Quarter'
+		dataType: string
+		lineageTag: 4b1911db-df31-49b0-8b2b-df812d684dde
+		summarizeBy: none
+		sourceColumn: Fiscal Quarter
+
+		annotation SummarizationSetBy = Automatic
+
+	column FQuarternYear
+		dataType: int64
+		formatString: 0
+		lineageTag: a13f73eb-1ced-4ad5-97e7-7df301f17ac7
+		summarizeBy: none
+		sourceColumn: FQuarternYear
+
+		annotation SummarizationSetBy = Automatic
+
+	column IsCurrentFQ
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: 0d0a4e53-c5f8-412e-943d-47fc9bb3cfca
+		summarizeBy: none
+		sourceColumn: IsCurrentFQ
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Fiscal Period'
+		dataType: int64
+		formatString: 0
+		lineageTag: 544b980c-b22d-444b-8699-d123d19bbb82
+		summarizeBy: none
+		sourceColumn: Fiscal Period
+
+		annotation SummarizationSetBy = Automatic
+
+	column FPeriodnYear
+		dataType: int64
+		formatString: 0
+		lineageTag: 7636cc34-bb88-4e2b-afb1-b1f3e34069ed
+		summarizeBy: none
+		sourceColumn: FPeriodnYear
+
+		annotation SummarizationSetBy = Automatic
+
+	column IsCurrentFP
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: 7932f9e7-f8f8-4512-afe1-4630a90a7316
+		summarizeBy: none
+		sourceColumn: IsCurrentFP
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Fiscal Week'
+		dataType: string
+		lineageTag: 54ecb1a8-107b-4c31-8445-7518ace44e90
+		summarizeBy: none
+		sourceColumn: Fiscal Week
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'Fiscal Year & Week'
+		dataType: string
+		lineageTag: 82fa1dcb-2e2d-4a77-9671-70de8b39bbb1
+		summarizeBy: none
+		sourceColumn: Fiscal Year & Week
+
+		annotation SummarizationSetBy = Automatic
+
+	column FWeeknYear
+		dataType: int64
+		formatString: 0
+		lineageTag: 501e49b5-da84-4f7c-86c9-8c650d62ec92
+		summarizeBy: none
+		sourceColumn: FWeeknYear
+
+		annotation SummarizationSetBy = Automatic
+
+	column IsCurrentFW
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: a2fd919f-865f-4ec9-bc23-67a9ad6f01d3
+		summarizeBy: none
+		sourceColumn: IsCurrentFW
+
+		annotation SummarizationSetBy = Automatic
+
+	column IsAfterToday
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: 2c9d19aa-eb3f-4598-81e2-9297a39e688a
+		summarizeBy: none
+		sourceColumn: IsAfterToday
+
+		annotation SummarizationSetBy = Automatic
+
+	column IsWorkingDay
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: 55035492-c38c-41fd-87ff-651f73bfe83f
+		summarizeBy: none
+		sourceColumn: IsWorkingDay
+
+		annotation SummarizationSetBy = Automatic
+
+	column IsHoliday
+		dataType: string
+		lineageTag: 2945756c-fe14-440d-be05-46b6af511fa3
+		summarizeBy: none
+		sourceColumn: IsHoliday
+
+		annotation SummarizationSetBy = Automatic
+
+	column IsBusinessDay
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: 5a3a0cdb-a77f-4cc0-92b4-995464c0c39f
+		summarizeBy: none
+		sourceColumn: IsBusinessDay
+
+		annotation SummarizationSetBy = Automatic
+
+	column IsPYTD
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: 05192ff8-1e4f-48f0-9864-18f2d7b4a476
+		summarizeBy: none
+		sourceColumn: IsPYTD
+
+		annotation SummarizationSetBy = Automatic
+
+	column IsPFYTD
+		dataType: boolean
+		formatString: """TRUE"";""TRUE"";""FALSE"""
+		lineageTag: deea43d9-cc54-46da-9bd9-7108d72f2faa
+		summarizeBy: none
+		sourceColumn: IsPFYTD
+
+		annotation SummarizationSetBy = Automatic
+
+	partition 'Datum tabel' = m
+		mode: import
+		source =
+				let
+				    Source = Query1(#date(2018, 1, 1), #date(2018, 12, 31), null, null, null)
+				in
+				    Source
+
+	annotation PBI_NavigationStepName = Navigation
+
+	annotation PBI_ResultType = Table
+

@@ -1,0 +1,51 @@
+table 'Calc group Time intelligence'
+	lineageTag: 23fc66f7-8af6-4df4-91bd-4b7b5188b465
+
+	calculationGroup
+
+		calculationItem Waarde = SELECTEDMEASURE()
+
+		calculationItem 'MTD maar niet voor avg verkopen' =
+				
+				IF(NOT ISSELECTEDMEASURE([avg verkopen]),
+				    CALCULATE(SELECTEDMEASURE(),
+				    DATESMTD('Datum tabel'[Date])))
+
+		calculationItem YTD =
+				
+				CALCULATE(SELECTEDMEASURE(),
+				DATESYTD('Datum tabel'[Date]))
+
+		calculationItem LASTDATE =
+				
+				CALCULATE(SELECTEDMEASURE(),LASTDATE('Datum tabel'[Date]))
+
+		calculationItem 'Moving average' =
+				CALCULATE(
+				    AVERAGEX('Datum tabel',SELECTEDMEASURE()),
+				    DATESINPERIOD('Datum tabel'[Date],
+				    LASTDATE('Datum tabel'[Date]),
+				    -7,DAY))
+
+		calculationItem 'Vorige maand' = CALCULATE([Omzet],DATEADD('Datum tabel'[Date],-1,MONTH))
+
+			formatStringDefinition = IF(SELECTEDMEASURE()>10,"00.00€","00$")
+
+	column 'Time intelligence'
+		dataType: string
+		lineageTag: 33013a0b-2381-4b89-81c7-4f7a3f276353
+		summarizeBy: none
+		sourceColumn: Name
+		sortByColumn: Ordinal
+
+		annotation SummarizationSetBy = Automatic
+
+	column Ordinal
+		dataType: int64
+		isHidden
+		lineageTag: c6eac2fc-2b89-4917-a0ac-53dd988a9cae
+		summarizeBy: sum
+		sourceColumn: Ordinal
+
+		annotation SummarizationSetBy = Automatic
+

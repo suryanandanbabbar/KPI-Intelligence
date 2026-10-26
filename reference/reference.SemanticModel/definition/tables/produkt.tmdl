@@ -1,0 +1,69 @@
+table produkt
+	lineageTag: 1cdef30a-9152-45a0-a825-67a223bc0aa3
+
+	column key
+		dataType: int64
+		formatString: 0
+		lineageTag: 59c2ae86-4d8b-4973-b155-400c7f33a0d7
+		summarizeBy: none
+		sourceColumn: key
+
+		annotation SummarizationSetBy = Automatic
+
+	column 'prod naam'
+		dataType: string
+		lineageTag: 542dba21-4074-4343-a0bf-8f0971c68d68
+		summarizeBy: none
+		sourceColumn: prod naam
+
+		annotation SummarizationSetBy = Automatic
+
+	column prijs
+		dataType: double
+		lineageTag: 7f605f12-d91f-4e86-ae25-b19ed92c287b
+		summarizeBy: none
+		sourceColumn: prijs
+
+		annotation SummarizationSetBy = User
+
+		annotation PBI_FormatHint = {"isGeneralNumber":true}
+
+	column 'produkt kleur'
+		dataType: string
+		lineageTag: f3baf9d5-47ca-49c4-845d-4af4c16b38c7
+		summarizeBy: none
+		sourceColumn: produkt kleur
+
+		annotation SummarizationSetBy = Automatic
+
+	column categoriekey
+		dataType: int64
+		formatString: 0
+		lineageTag: 3d997bf7-888c-4632-a8bc-3ddb16ddad7e
+		summarizeBy: none
+		sourceColumn: categoriekey
+
+		annotation SummarizationSetBy = Automatic
+
+	column j = PATH(produkt[key],produkt[categoriekey])
+		lineageTag: 9e46c85e-3003-4d37-ac25-cda2abf0fa35
+		summarizeBy: none
+
+		annotation SummarizationSetBy = Automatic
+
+	partition produkt-630dbbf7-8330-459e-9516-6b6fb17f4e0f = m
+		mode: import
+		source =
+				let
+				    Source = Excel.Workbook(File.Contents("C:\PBI\PBIX oefen per onderwerp\Oefen eigen bron.xlsx"), null, true),
+				    product_Table = Source{[Item="product",Kind="Table"]}[Data],
+				    #"Changed Type" = Table.TransformColumnTypes(product_Table,{{"key", Int64.Type}, {"naam", type text}, {"prijs", type number}, {"kleur", type text}, {"categoriekey", Int64.Type}}),
+				    #"Renamed Columns" = Table.RenameColumns(#"Changed Type",{{"naam", "prod naam"}, {"kleur", "produkt kleur"}}),
+				    #"Removed Bottom Rows" = Table.RemoveLastN(#"Renamed Columns",1)
+				in
+				    #"Removed Bottom Rows"
+
+	annotation PBI_ResultType = Table
+
+	annotation PBI_NavigationStepName = Navigation
+

@@ -1,0 +1,8 @@
+// Write your formula below, select 'Run' to try it out. When ready, select 'Update model' to add the measure to your model.
+DEFINE
+	MEASURE '_Measures_base'[New Measure] = COUNTROWS('_Measures_base')
+
+EVALUATE
+	SUMMARIZECOLUMNS(
+		"New Measure", [New Measure]
+	)

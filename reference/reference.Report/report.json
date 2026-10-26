@@ -1,0 +1,110 @@
+{
+  "config": "{\"version\":\"5.59\",\"themeCollection\":{\"baseTheme\":{\"name\":\"CY24SU10\",\"version\":\"5.59\",\"type\":2},\"customTheme\":{\"name\":\"City_Park37178596000909025.json\",\"version\":\"5.59\",\"type\":1}},\"activeSectionIndex\":0,\"bookmarks\":[{\"displayName\":\"Alleen grafiek\",\"name\":\"Bookmark508b1e7d2b773c1c0be0\",\"explorationState\":{\"version\":\"1.3\",\"activeSection\":\"ReportSectionbb0348c26774821d60b8\",\"sections\":{\"ReportSectionbb0348c26774821d60b8\":{\"visualContainers\":{}}},\"objects\":{\"merge\":{\"outspacePane\":[{\"properties\":{\"expanded\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"visible\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}}}}]}}},\"options\":{\"targetVisualNames\":[]}},{\"displayName\":\"Alles\",\"name\":\"Bookmark3bf0bed0bc2ca7a30157\",\"explorationState\":{\"version\":\"1.3\",\"activeSection\":\"ReportSectionbb0348c26774821d60b8\",\"sections\":{\"ReportSectionbb0348c26774821d60b8\":{\"visualContainers\":{}}},\"objects\":{\"merge\":{\"outspacePane\":[{\"properties\":{\"expanded\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"visible\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}}}}]}}},\"options\":{\"targetVisualNames\":[\"bf1a8b14cc6bdea41b2c\"]}},{\"displayName\":\"Met kleine\",\"name\":\"Bookmarkc06b8e2c11071666aa78\",\"explorationState\":{\"version\":\"1.3\",\"activeSection\":\"ReportSection7b1068c9249ad2843671\",\"filters\":{\"byExpr\":[{\"name\":\"Filter71ecdf7acd56e6997f1c\",\"type\":\"Categorical\",\"expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Entity\":\"categorie\"}},\"Property\":\"cat naam\"}},\"howCreated\":1}]},\"sections\":{\"ReportSection7b1068c9249ad2843671\":{\"visualContainers\":{}}},\"objects\":{\"merge\":{\"outspacePane\":[{\"properties\":{\"expanded\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"visible\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}}}}]}}},\"options\":{\"targetVisualNames\":[\"d9f286f642a303606995\"]}},{\"displayName\":\"Zonder kliene\",\"name\":\"Bookmark8b1d8b5267d740032373\",\"explorationState\":{\"version\":\"1.3\",\"activeSection\":\"ReportSection7b1068c9249ad2843671\",\"filters\":{\"byExpr\":[{\"name\":\"Filter71ecdf7acd56e6997f1c\",\"type\":\"Categorical\",\"expression\":{\"Column\":{\"Expression\":{\"SourceRef\":{\"Entity\":\"categorie\"}},\"Property\":\"cat naam\"}},\"howCreated\":1}]},\"sections\":{\"ReportSection7b1068c9249ad2843671\":{\"visualContainers\":{}}},\"objects\":{\"merge\":{\"outspacePane\":[{\"properties\":{\"expanded\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"visible\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}}}}]}}},\"options\":{\"targetVisualNames\":[\"d0196d60b026e4114281\"]}}],\"defaultDrillFilterOtherVisuals\":true,\"slowDataSourceSettings\":{\"isCrossHighlightingDisabled\":false,\"isSlicerSelectionsButtonEnabled\":false,\"isFilterSelectionsButtonEnabled\":false,\"isFieldWellButtonEnabled\":false,\"isApplyAllButtonEnabled\":false},\"linguisticSchemaSyncVersion\":2,\"settings\":{\"isPersistentUserStateDisabled\":false,\"hideVisualContainerHeader\":false,\"useStylableVisualContainerHeader\":true,\"exportDataMode\":1,\"useNewFilterPaneExperience\":true,\"optOutNewFilterPaneExperience\":false,\"defaultFilterActionIsDataFilter\":false,\"useCrossReportDrillthrough\":false,\"allowChangeFilterTypes\":false,\"allowInlineExploration\":true,\"disableFilterPaneSearch\":false,\"allowDataPointLassoSelect\":true,\"useEnhancedTooltips\":true},\"objects\":{\"outspacePane\":[{\"properties\":{\"expanded\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}},\"visible\":{\"expr\":{\"Literal\":{\"Value\":\"true\"}}}}}]}}",
+  "filters": "[]",
+  "layoutOptimization": 0,
+  "publicCustomVisuals": [
+    "Datepicker_1687358625",
+    "PBI_CV_16948668_E17D_454B_8664_2F2C470EA8C1",
+    "textFilter25A4896A83E0487089E2B90C9AE57C8A",
+    "wishyoulizationbarchartrace"
+  ],
+  "resourcePackages": [
+    {
+      "resourcePackage": {
+        "disabled": false,
+        "items": [
+          {
+            "name": "City_Park37178596000909025.json",
+            "path": "City_Park37178596000909025.json",
+            "type": 201
+          }
+        ],
+        "name": "RegisteredResources",
+        "type": 1
+      }
+    },
+    {
+      "resourcePackage": {
+        "disabled": false,
+        "items": [
+          {
+            "name": "CY24SU10",
+            "path": "BaseThemes/CY24SU10.json",
+            "type": 202
+          }
+        ],
+        "name": "SharedResources",
+        "type": 2
+      }
+    },
+    {
+      "resourcePackage": {
+        "disabled": false,
+        "items": [
+          {
+            "name": "HierarchicalFilterF39DAE8D57A743EF89F5C3809DEE2B67.pbiviz.json",
+            "path": "HierarchicalFilterF39DAE8D57A743EF89F5C3809DEE2B67.pbiviz.json",
+            "type": 5
+          }
+        ],
+        "name": "HierarchicalFilterF39DAE8D57A743EF89F5C3809DEE2B67",
+        "type": 0
+      }
+    },
+    {
+      "resourcePackage": {
+        "disabled": false,
+        "items": [
+          {
+            "name": "multipleAxesChartBC35C88E1D1A49DFA5A9240AFBB4E3BC.pbiviz.json",
+            "path": "multipleAxesChartBC35C88E1D1A49DFA5A9240AFBB4E3BC.pbiviz.json",
+            "type": 5
+          }
+        ],
+        "name": "multipleAxesChartBC35C88E1D1A49DFA5A9240AFBB4E3BC",
+        "type": 0
+      }
+    },
+    {
+      "resourcePackage": {
+        "disabled": false,
+        "items": [
+          {
+            "name": "resources/ChicletSlicer1448559807354.pbiviz.json",
+            "path": "ChicletSlicer1448559807354.pbiviz.json",
+            "type": 5
+          }
+        ],
+        "name": "ChicletSlicer1448559807354",
+        "type": 0
+      }
+    },
+    {
+      "resourcePackage": {
+        "disabled": false,
+        "items": [
+          {
+            "name": "toggleswitch001.pbiviz.json",
+            "path": "toggleswitch001.pbiviz.json",
+            "type": 5
+          }
+        ],
+        "name": "toggleswitch001",
+        "type": 0
+      }
+    }
+  ],
+  "sections": [
+    {
+      "config": "{}",
+      "displayName": "Page 1",
+      "displayOption": 1,
+      "filters": "[]",
+      "height": 720.00,
+      "name": "044f6210ac66344853be",
+      "visualContainers": [],
+      "width": 1280.00
+    }
+  ],
+  "theme": "City_Park37178596000909025.json"
+}
