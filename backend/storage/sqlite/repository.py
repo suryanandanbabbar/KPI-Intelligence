@@ -24,8 +24,16 @@ from backend.repository.interfaces import (
     ConcurrencyConflictError,
     RepositoryError,
 )
-from backend.repository.context import TenantContext
+from backend.repository.context import TenantContext, TenantAccessDeniedError
 
+TENANT_SCOPED_CONTAINERS = {
+    CosmosContainer.METADATA_CATALOG,
+    CosmosContainer.KPI_GOVERNANCE,
+    CosmosContainer.OPERATIONAL_AUDIT,
+}
+GLOBAL_REFERENCE_CONTAINERS = {
+    CosmosContainer.KPI_ONTOLOGY,
+}
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS cosmos_documents (
@@ -122,6 +130,17 @@ class SQLiteRepository(IRepository):
         item_id: str,
         tenant_context: Optional[TenantContext] = None,
     ) -> Optional[Dict[str, Any]]:
+        if container in TENANT_SCOPED_CONTAINERS:
+            if tenant_context is None:
+                raise TenantAccessDeniedError(
+                    f"Explicit TenantContext is mandatory for tenant-scoped container '{container.value}'."
+                )
+            if not tenant_context.is_system:
+                if str(partition_key).strip().lower() != str(tenant_context.tenant_id).strip().lower():
+                    raise TenantAccessDeniedError(
+                        f"Partition key '{partition_key}' does not match tenant context '{tenant_context.tenant_id}'."
+                    )
+
         query = """
             SELECT document_json, tenant_id, etag 
             FROM cosmos_documents 
@@ -137,7 +156,7 @@ class SQLiteRepository(IRepository):
             data["_etag"] = row["etag"]
 
             # Enforce tenant isolation if tenant context provided
-            if tenant_context:
+            if tenant_context and container in TENANT_SCOPED_CONTAINERS:
                 tenant_context.assert_authorized(data.get("tenant_id"))
 
             return data
@@ -158,8 +177,22 @@ class SQLiteRepository(IRepository):
         schema_version = item.get("schema_version", "2.0.0")
         item_tenant = item.get("tenant_id")
 
-        if tenant_context:
-            tenant_context.assert_authorized(item_tenant)
+        if container in TENANT_SCOPED_CONTAINERS:
+            if tenant_context is None:
+                raise TenantAccessDeniedError(
+                    f"Explicit TenantContext is mandatory for tenant-scoped container '{container.value}'."
+                )
+            if not tenant_context.is_system:
+                if str(partition_key).strip().lower() != str(tenant_context.tenant_id).strip().lower():
+                    raise TenantAccessDeniedError(
+                        f"Partition key '{partition_key}' does not match tenant context '{tenant_context.tenant_id}'."
+                    )
+                tenant_context.assert_authorized(item_tenant)
+        elif container in GLOBAL_REFERENCE_CONTAINERS:
+            if not tenant_context or not tenant_context.is_system:
+                raise TenantAccessDeniedError(
+                    f"Mutations on global reference container '{container.value}' require system context."
+                )
 
         # Optimistic concurrency check
         new_etag = compute_etag(item)
@@ -231,6 +264,22 @@ class SQLiteRepository(IRepository):
         item_id: str,
         tenant_context: Optional[TenantContext] = None,
     ) -> bool:
+        if container in TENANT_SCOPED_CONTAINERS:
+            if tenant_context is None:
+                raise TenantAccessDeniedError(
+                    f"Explicit TenantContext is mandatory for tenant-scoped container '{container.value}'."
+                )
+            if not tenant_context.is_system:
+                if str(partition_key).strip().lower() != str(tenant_context.tenant_id).strip().lower():
+                    raise TenantAccessDeniedError(
+                        f"Partition key '{partition_key}' does not match tenant context '{tenant_context.tenant_id}'."
+                    )
+        elif container in GLOBAL_REFERENCE_CONTAINERS:
+            if not tenant_context or not tenant_context.is_system:
+                raise TenantAccessDeniedError(
+                    f"Deleting from global reference container '{container.value}' requires system context."
+                )
+
         with self._get_connection() as conn:
             cur = conn.execute(
                 "SELECT tenant_id FROM cosmos_documents WHERE container_name = ? AND partition_key = ? AND document_id = ?",
@@ -240,7 +289,7 @@ class SQLiteRepository(IRepository):
             if not row:
                 return False
 
-            if tenant_context:
+            if tenant_context and container in TENANT_SCOPED_CONTAINERS:
                 tenant_context.assert_authorized(row["tenant_id"])
 
             del_cur = conn.execute(
@@ -263,6 +312,25 @@ class SQLiteRepository(IRepository):
         Translates Cosmos SQL query to SQLite query using json_extract.
         Executes strictly parameterized SQL.
         """
+        if container in TENANT_SCOPED_CONTAINERS:
+            if tenant_context is None:
+                raise TenantAccessDeniedError(
+                    f"Explicit TenantContext is mandatory for tenant-scoped container '{container.value}'."
+                )
+            if not tenant_context.is_system:
+                if partition_key is None:
+                    partition_key = tenant_context.tenant_id
+                elif str(partition_key).strip().lower() != str(tenant_context.tenant_id).strip().lower():
+                    raise TenantAccessDeniedError(
+                        f"Partition key '{partition_key}' does not match tenant context '{tenant_context.tenant_id}'."
+                    )
+                for p in query_spec.parameters:
+                    if p.get("name") in ("@tenant_id", "@__enforced_tenant_id"):
+                        if str(p.get("value", "")).strip().lower() != str(tenant_context.tenant_id).strip().lower():
+                            raise TenantAccessDeniedError(
+                                f"Query parameter '{p.get('name')}={p.get('value')}' conflicts with tenant context '{tenant_context.tenant_id}'."
+                            )
+
         # Parse continuation token as integer offset
         offset = 0
         if continuation_token:
@@ -288,7 +356,7 @@ class SQLiteRepository(IRepository):
         cosmos_sql = query_spec.query
 
         # If tenant context is present, always enforce tenant filter on tenant-owned containers
-        if tenant_context and not tenant_context.is_system:
+        if container in TENANT_SCOPED_CONTAINERS and tenant_context and not tenant_context.is_system:
             where_clauses.append("tenant_id = ?")
             sql_params.append(tenant_context.tenant_id)
 
@@ -342,13 +410,23 @@ class SQLiteRepository(IRepository):
         sql_params.append(offset)
 
         items = []
-        with self._get_connection() as conn:
-            cur = conn.execute(final_query, sql_params)
-            rows = cur.fetchall()
-            for r in rows:
-                item_data = json.loads(r["document_json"])
-                item_data["_etag"] = r["etag"]
-                items.append(item_data)
+        try:
+            with self._get_connection() as conn:
+                cur = conn.execute(final_query, sql_params)
+                rows = cur.fetchall()
+                for r in rows:
+                    item_data = json.loads(r["document_json"])
+                    item_data["_etag"] = r["etag"]
+                    items.append(item_data)
+        except TenantAccessDeniedError:
+            raise
+        except sqlite3.Error as ex:
+            raise RepositoryError(f"SQLite error during query_items: {ex}") from ex
+
+        # Defense-in-depth: assert tenant authorization on every returned document
+        if container in TENANT_SCOPED_CONTAINERS and tenant_context and not tenant_context.is_system:
+            for item_data in items:
+                tenant_context.assert_authorized(item_data.get("tenant_id"))
 
         # Compute next continuation token
         next_token = str(offset + len(items)) if len(items) == page_size else None

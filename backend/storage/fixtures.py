@@ -309,15 +309,19 @@ def generate_synthetic_fixtures() -> Dict[CosmosContainer, List[Any]]:
     }
 
 
+from backend.repository.context import TenantContext
+
+
 def seed_synthetic_data(repo: Any) -> int:
     """Convenience helper to seed synthetic fixtures into any IRepository."""
     fixtures = generate_synthetic_fixtures()
+    sys_ctx = TenantContext.system_context()
     total_seeded = 0
     for container, docs in fixtures.items():
         partition_key_attr = "business_domain" if container == CosmosContainer.KPI_ONTOLOGY else "tenant_id"
         for doc in docs:
             pk = getattr(doc, partition_key_attr) or getattr(doc, "id")
-            repo.upsert_item(container, pk, doc.to_dict())
+            repo.upsert_item(container, pk, doc.to_dict(), tenant_context=sys_ctx)
             total_seeded += 1
     return total_seeded
 

@@ -25,6 +25,7 @@ class DocumentType(str, Enum):
     REPORT = "report"
     SEMANTIC_MODEL = "semantic_model"
     ANALYTICAL_OBJECT = "analytical_object"
+    SECURITY_PRINCIPAL = "security_principal"
     LINEAGE_EDGE = "lineage_edge"
     SPREADSHEET_WORKBOOK = "spreadsheet_workbook"
 

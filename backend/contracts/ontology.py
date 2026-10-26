@@ -14,11 +14,13 @@ from backend.contracts.base import BaseDocument, DocumentType
 class OntologyVersionDocument(BaseDocument):
     """Release metadata for a curated KPI bank release."""
     doc_type: str = DocumentType.ONTOLOGY_VERSION.value
+    ontology_version_id: Optional[str] = None
     business_domain: str = "GENERAL"  # Partition key
     version_number: str = "1.0.0"
     content_hash: str = ""
     kpi_count: int = 0
     change_summary: Optional[str] = None
+    created_by_user_id: Optional[str] = None
     is_active: bool = True
 
     def validate(self) -> None:
@@ -27,12 +29,15 @@ class OntologyVersionDocument(BaseDocument):
             self.business_domain = "GENERAL"
         if not self.content_hash:
             raise ValueError("OntologyVersionDocument requires 'content_hash'.")
+        if not self.ontology_version_id:
+            self.ontology_version_id = self.id
 
 
 @dataclass
 class OntologyEntryDocument(BaseDocument):
     """Curated standard KPI definition from the KPI Bank."""
     doc_type: str = DocumentType.ONTOLOGY_ENTRY.value
+    ontology_entry_id: Optional[str] = None
     business_domain: str = "CLAIMS_RISK"  # Partition key
     ontology_version_id: str = ""
     kpi_code: str = ""
@@ -49,6 +54,8 @@ class OntologyEntryDocument(BaseDocument):
     source_subdomain: Optional[str] = None
     source_line_of_business: Optional[str] = None
     source_status: Optional[str] = None
+    source_created_at: Optional[str] = None
+    source_created_by: Optional[str] = None
     enrichments: Dict[str, Any] = field(default_factory=dict)
     ontology_payload: Dict[str, Any] = field(default_factory=dict)
 
@@ -60,12 +67,15 @@ class OntologyEntryDocument(BaseDocument):
             raise ValueError("OntologyEntryDocument requires 'kpi_code'.")
         if not self.kpi_name:
             raise ValueError("OntologyEntryDocument requires 'kpi_name'.")
+        if not self.ontology_entry_id:
+            self.ontology_entry_id = self.id
 
 
 @dataclass
 class BusinessDomainDocument(BaseDocument):
     """One of the 6 canonical business domains (Claims & Risk, Underwriting, Legal, etc.)."""
     doc_type: str = DocumentType.BUSINESS_DOMAIN.value
+    domain_id: Optional[str] = None
     business_domain: str = "SYSTEM"  # Partition key
     domain_code: str = ""
     domain_name: str = ""
@@ -78,12 +88,16 @@ class BusinessDomainDocument(BaseDocument):
             raise ValueError("BusinessDomainDocument requires 'domain_code'.")
         if not self.domain_name:
             raise ValueError("BusinessDomainDocument requires 'domain_name'.")
+        if not self.domain_id:
+            self.domain_id = self.id
 
 
 @dataclass
 class PlatformCapabilityDocument(BaseDocument):
     """Supported metadata features and capabilities by platform version (global reference)."""
     doc_type: str = DocumentType.PLATFORM_CAPABILITY.value
+    platform_capability_id: Optional[str] = None
+    visual_type_id: Optional[str] = None
     business_domain: str = "SYSTEM"  # Global partition key
     platform: str = "POWER_BI"
     artifact_type: str = "PBIP"
@@ -92,10 +106,15 @@ class PlatformCapabilityDocument(BaseDocument):
     minimum_source_version: Optional[str] = None
     maximum_source_version: Optional[str] = None
     notes: Optional[str] = None
+    canonical_type: Optional[str] = None
+    native_type: Optional[str] = None
+    description: Optional[str] = None
+    type_properties: Dict[str, Any] = field(default_factory=dict)
     capability_properties: Dict[str, Any] = field(default_factory=dict)
 
     def validate(self) -> None:
         super().validate()
         if not self.platform:
             raise ValueError("PlatformCapabilityDocument requires 'platform'.")
-
+        if not self.platform_capability_id:
+            self.platform_capability_id = self.id

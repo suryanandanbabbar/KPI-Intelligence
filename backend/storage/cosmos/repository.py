@@ -13,6 +13,7 @@ Features:
 
 import time
 import logging
+import re
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timezone
 
@@ -26,10 +27,49 @@ from backend.repository.interfaces import (
     ThrottlingError,
     RepositoryError,
 )
-from backend.repository.context import TenantContext
+from backend.repository.context import TenantContext, TenantAccessDeniedError
 from backend.storage.config import StorageConfig
 
 logger = logging.getLogger("kpi_intel.storage.cosmos")
+
+TENANT_SCOPED_CONTAINERS = {
+    CosmosContainer.METADATA_CATALOG,
+    CosmosContainer.KPI_GOVERNANCE,
+    CosmosContainer.OPERATIONAL_AUDIT,
+}
+GLOBAL_REFERENCE_CONTAINERS = {
+    CosmosContainer.KPI_ONTOLOGY,
+}
+
+
+def enforce_tenant_predicate(query: str, param_name: str = "@__enforced_tenant_id") -> str:
+    """
+    Safely injects tenant isolation condition into a Cosmos DB SQL query.
+    Handles queries with or without existing WHERE clauses, and preserves
+    ORDER BY, GROUP BY, OFFSET, and LIMIT clauses.
+    """
+    where_match = re.search(
+        r'\bWHERE\b(.*?)(?=\b(?:GROUP\s+BY|ORDER\s+BY|OFFSET|LIMIT)\b|$)',
+        query,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if where_match:
+        existing_cond = where_match.group(1).strip()
+        start = where_match.start()
+        end = where_match.end()
+        new_where = f"WHERE ({existing_cond}) AND (c.tenant_id = {param_name})"
+        suffix = query[end:].lstrip()
+        if suffix:
+            return f"{query[:start]}{new_where} {suffix}"
+        else:
+            return f"{query[:start]}{new_where}"
+    else:
+        clause_match = re.search(r'\b(?:GROUP\s+BY|ORDER\s+BY|OFFSET|LIMIT)\b', query, re.IGNORECASE)
+        if clause_match:
+            idx = clause_match.start()
+            return f"{query[:idx].rstrip()} WHERE c.tenant_id = {param_name} {query[idx:]}"
+        else:
+            return f"{query.rstrip()} WHERE c.tenant_id = {param_name}"
 
 # Lazy-import azure.cosmos and azure.identity
 try:
@@ -101,6 +141,11 @@ class CosmosRepository(IRepository):
             try:
                 attempt += 1
                 return op_callable()
+            except TenantAccessDeniedError:
+                # Security: Never retry or wrap tenant authorization errors
+                raise
+            except (DocumentNotFoundError, ConcurrencyConflictError, ThrottlingError):
+                raise
             except CosmosHttpResponseError as ex:
                 status_code = getattr(ex, "status_code", 500)
                 # 429: Throttling / Request Rate Too Large
@@ -139,6 +184,10 @@ class CosmosRepository(IRepository):
                 raise RepositoryError(
                     f"Cosmos DB error during '{operation_name}': HTTP {status_code} - {getattr(ex, 'message', str(ex))}"
                 )
+            except Exception as ex:
+                raise RepositoryError(
+                    f"Cosmos DB error during '{operation_name}': {ex}"
+                ) from ex
 
     def get_item(
         self,
@@ -147,6 +196,17 @@ class CosmosRepository(IRepository):
         item_id: str,
         tenant_context: Optional[TenantContext] = None,
     ) -> Optional[Dict[str, Any]]:
+        if container in TENANT_SCOPED_CONTAINERS:
+            if tenant_context is None:
+                raise TenantAccessDeniedError(
+                    f"Explicit TenantContext is mandatory for tenant-scoped container '{container.value}'."
+                )
+            if not tenant_context.is_system:
+                if str(partition_key).strip().lower() != str(tenant_context.tenant_id).strip().lower():
+                    raise TenantAccessDeniedError(
+                        f"Partition key '{partition_key}' does not match tenant context '{tenant_context.tenant_id}'."
+                    )
+
         client = self._get_container_client(container)
 
         def _read():
@@ -160,7 +220,7 @@ class CosmosRepository(IRepository):
                 raise
 
         doc = self._execute_with_retry(f"read_item({container.value}, {item_id})", _read)
-        if doc and tenant_context:
+        if doc and tenant_context and container in TENANT_SCOPED_CONTAINERS:
             tenant_context.assert_authorized(doc.get("tenant_id"))
         return doc
 
@@ -173,8 +233,22 @@ class CosmosRepository(IRepository):
         etag: Optional[str] = None,
     ) -> Dict[str, Any]:
         item_tenant = item.get("tenant_id")
-        if tenant_context:
-            tenant_context.assert_authorized(item_tenant)
+        if container in TENANT_SCOPED_CONTAINERS:
+            if tenant_context is None:
+                raise TenantAccessDeniedError(
+                    f"Explicit TenantContext is mandatory for tenant-scoped container '{container.value}'."
+                )
+            if not tenant_context.is_system:
+                if str(partition_key).strip().lower() != str(tenant_context.tenant_id).strip().lower():
+                    raise TenantAccessDeniedError(
+                        f"Partition key '{partition_key}' does not match tenant context '{tenant_context.tenant_id}'."
+                    )
+                tenant_context.assert_authorized(item_tenant)
+        elif container in GLOBAL_REFERENCE_CONTAINERS:
+            if not tenant_context or not tenant_context.is_system:
+                raise TenantAccessDeniedError(
+                    f"Mutations on global reference container '{container.value}' require system context."
+                )
 
         client = self._get_container_client(container)
         doc_id = item.get("id")
@@ -200,12 +274,26 @@ class CosmosRepository(IRepository):
         item_id: str,
         tenant_context: Optional[TenantContext] = None,
     ) -> bool:
-        # If tenant context provided, verify tenant ownership before deleting
-        if tenant_context:
+        if container in TENANT_SCOPED_CONTAINERS:
+            if tenant_context is None:
+                raise TenantAccessDeniedError(
+                    f"Explicit TenantContext is mandatory for tenant-scoped container '{container.value}'."
+                )
+            if not tenant_context.is_system:
+                if str(partition_key).strip().lower() != str(tenant_context.tenant_id).strip().lower():
+                    raise TenantAccessDeniedError(
+                        f"Partition key '{partition_key}' does not match tenant context '{tenant_context.tenant_id}'."
+                    )
+            # Verify existing item tenant ownership before deleting
             existing = self.get_item(container, partition_key, item_id, tenant_context)
             if not existing:
                 return False
             tenant_context.assert_authorized(existing.get("tenant_id"))
+        elif container in GLOBAL_REFERENCE_CONTAINERS:
+            if not tenant_context or not tenant_context.is_system:
+                raise TenantAccessDeniedError(
+                    f"Deleting from global reference container '{container.value}' requires system context."
+                )
 
         client = self._get_container_client(container)
 
@@ -229,15 +317,44 @@ class CosmosRepository(IRepository):
         page_size: int = 100,
         continuation_token: Optional[str] = None,
     ) -> PagedResult:
-        client = self._get_container_client(container)
-
-        # Enforce tenant isolation parameter if tenant context present
         query = query_spec.query
         params = list(query_spec.parameters)
-        if tenant_context and not tenant_context.is_system:
-            # Ensure tenant_id parameter matches context
-            if not any(p["name"] == "@tenant_id" for p in params):
-                params.append({"name": "@tenant_id", "value": tenant_context.tenant_id})
+
+        if container in TENANT_SCOPED_CONTAINERS:
+            if tenant_context is None:
+                raise TenantAccessDeniedError(
+                    f"Explicit TenantContext is mandatory for tenant-scoped container '{container.value}'."
+                )
+            if not tenant_context.is_system:
+                # 1. Enforce partition key matches tenant context
+                if partition_key is None:
+                    partition_key = tenant_context.tenant_id
+                elif str(partition_key).strip().lower() != str(tenant_context.tenant_id).strip().lower():
+                    raise TenantAccessDeniedError(
+                        f"Partition key '{partition_key}' does not match tenant context '{tenant_context.tenant_id}'."
+                    )
+
+                # 2. Reject caller query parameters that conflict with tenant isolation
+                for p in params:
+                    p_name = p.get("name", "")
+                    if p_name in ("@tenant_id", "@__enforced_tenant_id"):
+                        if str(p.get("value", "")).strip().lower() != str(tenant_context.tenant_id).strip().lower():
+                            raise TenantAccessDeniedError(
+                                f"Query parameter '{p_name}={p.get('value')}' conflicts with tenant context '{tenant_context.tenant_id}'."
+                            )
+
+                # 3. Rewrite query to enforce tenant predicate
+                query = enforce_tenant_predicate(query, param_name="@__enforced_tenant_id")
+
+                # Remove any existing @__enforced_tenant_id parameter and append trusted value
+                params = [p for p in params if p.get("name") != "@__enforced_tenant_id"]
+                params.append({"name": "@__enforced_tenant_id", "value": tenant_context.tenant_id})
+
+                # If @tenant_id was referenced in caller query, ensure matching value is present
+                if "@tenant_id" in query and not any(p.get("name") == "@tenant_id" for p in params):
+                    params.append({"name": "@tenant_id", "value": tenant_context.tenant_id})
+
+        client = self._get_container_client(container)
 
         def _query():
             query_iterable = client.query_items(
@@ -263,7 +380,15 @@ class CosmosRepository(IRepository):
 
             return PagedResult(items=items, continuation_token=next_token, request_charge=charge)
 
-        return self._execute_with_retry(f"query_items({container.value})", _query)
+        paged_result = self._execute_with_retry(f"query_items({container.value})", _query)
+
+        # Defense-in-depth: assert tenant authorization on every returned document
+        if container in TENANT_SCOPED_CONTAINERS and tenant_context and not tenant_context.is_system:
+            for doc in paged_result.items:
+                if isinstance(doc, dict):
+                    tenant_context.assert_authorized(doc.get("tenant_id"))
+
+        return paged_result
 
     def health_check(self) -> Dict[str, Any]:
         """Performs a lightweight read to verify Cosmos DB connectivity."""

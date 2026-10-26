@@ -14,6 +14,7 @@ from backend.contracts.base import BaseDocument, DocumentType
 class KpiCandidateDocument(BaseDocument):
     """Discovered candidate KPI extracted from calculations, measures, or visual summaries."""
     doc_type: str = DocumentType.KPI_CANDIDATE.value
+    kpi_candidate_id: Optional[str] = None
     asset_version_id: str = ""
     source_object_id: str = ""
     candidate_name: str = ""
@@ -35,6 +36,8 @@ class KpiCandidateDocument(BaseDocument):
             raise ValueError("KpiCandidateDocument requires 'tenant_id'.")
         if not self.candidate_name:
             raise ValueError("KpiCandidateDocument requires 'candidate_name'.")
+        if not self.kpi_candidate_id:
+            self.kpi_candidate_id = self.id
 
 
 @dataclass
@@ -60,15 +63,25 @@ class ProposalCandidateItem:
 class KpiMappingDocument(BaseDocument):
     """Mapping record connecting a candidate KPI to a curated ontology entry."""
     doc_type: str = DocumentType.KPI_MAPPING.value
+    kpi_mapping_id: Optional[str] = None
     kpi_candidate_id: str = ""
     asset_version_id: str = ""
     ontology_version_id: str = ""
     selected_ontology_entry_id: Optional[str] = None
+    mapping_run_id: Optional[str] = None
+    top_candidate_count: int = 0
     mapping_status: str = "PROPOSED"  # PROPOSED, APPROVED, REJECTED, OVERRIDDEN
     decision_source: str = "LLM_INFERENCE"  # LLM_INFERENCE, DETERMINISTIC_FALLBACK, HUMAN_OVERRIDE
     mapping_version: int = 1
     input_fingerprint: str = ""
+    mapping_engine_version: Optional[str] = "1.0.0"
+    confidence_band: Optional[str] = "HIGH"
+    confidence_score: Optional[float] = 1.0
+    match_score: Optional[float] = 1.0
     top_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    kpi_mapping_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    mapping_evidence: List[Dict[str, Any]] = field(default_factory=list)
+    mapping_reviews: List[Dict[str, Any]] = field(default_factory=list)
     active_approval: Optional[Dict[str, Any]] = None
 
     def validate(self) -> None:
@@ -80,14 +93,48 @@ class KpiMappingDocument(BaseDocument):
         valid_statuses = {"PROPOSED", "APPROVED", "REJECTED", "OVERRIDDEN"}
         if self.mapping_status not in valid_statuses:
             raise ValueError(f"Invalid mapping_status '{self.mapping_status}'. Allowed: {valid_statuses}")
+        if not self.kpi_mapping_id:
+            self.kpi_mapping_id = self.id
+        if not self.kpi_mapping_candidates and self.top_candidates:
+            self.kpi_mapping_candidates = self.top_candidates
+
+
+@dataclass
+class KpiMappingRunDocument(BaseDocument):
+    """Execution run record for automated KPI mapping inference."""
+    doc_type: str = DocumentType.KPI_MAPPING_RUN.value
+    mapping_run_id: Optional[str] = None
+    asset_version_id: str = ""
+    ontology_version_id: str = ""
+    candidate_generation_version: str = "1.0.0"
+    mapping_engine_version: str = "1.0.0"
+    primary_engine: str = "LLM_INFERENCE"
+    fallback_used: bool = False
+    llm_provider: Optional[str] = None
+    llm_model: Optional[str] = None
+    prompt_version: Optional[str] = None
+    input_fingerprint: str = ""
+    run_status: str = "COMPLETED"
+    started_at: Optional[str] = None
+    completed_at: Optional[str] = None
+    error_summary: Optional[str] = None
+
+    def validate(self) -> None:
+        super().validate()
+        if not self.tenant_id:
+            raise ValueError("KpiMappingRunDocument requires 'tenant_id'.")
+        if not self.mapping_run_id:
+            self.mapping_run_id = self.id
 
 
 @dataclass
 class MappingApprovalDocument(BaseDocument):
     """Immutable ledger record of human sign-off approving a candidate mapping."""
     doc_type: str = DocumentType.MAPPING_APPROVAL.value
+    mapping_approval_id: Optional[str] = None
     kpi_mapping_id: str = ""
     approved_ontology_entry_id: str = ""
+    approved_mapping_candidate_id: Optional[str] = None
     approved_by_user_id: str = ""
     approval_status: str = "ACTIVE"
     approval_version: int = 1
@@ -103,16 +150,22 @@ class MappingApprovalDocument(BaseDocument):
             raise ValueError("MappingApprovalDocument requires 'kpi_mapping_id'.")
         if not self.approved_by_user_id:
             raise ValueError("MappingApprovalDocument requires 'approved_by_user_id'.")
+        if not self.mapping_approval_id:
+            self.mapping_approval_id = self.id
 
 
 @dataclass
 class MappingOverrideDocument(BaseDocument):
     """Manual human override record specifying an alternative ontology entry and justification."""
     doc_type: str = DocumentType.MAPPING_OVERRIDE.value
+    override_id: Optional[str] = None
     kpi_mapping_id: str = ""
     override_type: str = "SUBSTITUTION"
     previous_ontology_entry_id: Optional[str] = None
     replacement_ontology_entry_id: str = ""
+    mapping_candidate_id: Optional[str] = None
+    supersedes_override_id: Optional[str] = None
+    justification_hash: Optional[str] = None
     override_justification: str = ""
     normalised_justification: Optional[str] = None
     created_by_user_id: str = ""
@@ -124,12 +177,17 @@ class MappingOverrideDocument(BaseDocument):
             raise ValueError("MappingOverrideDocument requires 'tenant_id'.")
         if not self.override_justification or not self.override_justification.strip():
             raise ValueError("MappingOverrideDocument strictly requires a non-empty 'override_justification'.")
+        if not self.override_id:
+            self.override_id = self.id
 
 
 @dataclass
 class KpiRationalisationDocument(BaseDocument):
     """Deduplication and consolidation decision across duplicate or equivalent KPIs."""
     doc_type: str = DocumentType.KPI_RATIONALISATION.value
+    rationalisation_decision_id: Optional[str] = None
+    equivalence_candidate_id: Optional[str] = None
+    canonical_kpi_candidate_id: Optional[str] = None
     source_candidate_id: str = ""
     target_candidate_id: str = ""
     canonical_candidate_id: Optional[str] = None
@@ -139,7 +197,9 @@ class KpiRationalisationDocument(BaseDocument):
     equivalence_score: float = 0.0
     approved_by_user_id: Optional[str] = None
     equivalence_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    kpi_equivalence_candidates: List[Dict[str, Any]] = field(default_factory=list)
     evidence: List[Dict[str, Any]] = field(default_factory=list)
+    rationalisation_evidence: List[Dict[str, Any]] = field(default_factory=list)
 
     def validate(self) -> None:
         super().validate()
@@ -147,12 +207,19 @@ class KpiRationalisationDocument(BaseDocument):
             raise ValueError("KpiRationalisationDocument requires 'tenant_id'.")
         if not self.source_candidate_id or not self.target_candidate_id:
             raise ValueError("KpiRationalisationDocument requires source and target candidate IDs.")
+        if not self.rationalisation_decision_id:
+            self.rationalisation_decision_id = self.id
+        if not self.kpi_equivalence_candidates and self.equivalence_candidates:
+            self.kpi_equivalence_candidates = self.equivalence_candidates
+        if not self.rationalisation_evidence and self.evidence:
+            self.rationalisation_evidence = self.evidence
 
 
 @dataclass
 class DomainClassificationDocument(BaseDocument):
     """Domain classification record mapping an analytical object to a business domain."""
     doc_type: str = DocumentType.DOMAIN_CLASSIFICATION.value
+    classification_id: Optional[str] = None
     asset_version_id: str = ""
     target_object_id: str = ""
     domain_id: str = ""
@@ -168,12 +235,15 @@ class DomainClassificationDocument(BaseDocument):
             raise ValueError("DomainClassificationDocument requires 'tenant_id'.")
         if not self.target_object_id or not self.domain_id:
             raise ValueError("DomainClassificationDocument requires 'target_object_id' and 'domain_id'.")
+        if not self.classification_id:
+            self.classification_id = self.id
 
 
 @dataclass
 class MetadataFieldReviewDocument(BaseDocument):
     """Human review and override of specific extracted metadata fields."""
     doc_type: str = DocumentType.METADATA_FIELD_REVIEW.value
+    field_review_id: Optional[str] = None
     asset_version_id: str = ""
     target_object_id: str = ""
     field_path: str = ""
@@ -191,4 +261,5 @@ class MetadataFieldReviewDocument(BaseDocument):
             raise ValueError("MetadataFieldReviewDocument requires 'tenant_id'.")
         if not self.field_path:
             raise ValueError("MetadataFieldReviewDocument requires 'field_path'.")
-
+        if not self.field_review_id:
+            self.field_review_id = self.id

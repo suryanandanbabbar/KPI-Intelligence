@@ -22,6 +22,8 @@ from backend.contracts.catalog import (
     ReportDocument,
     ReportPageItem,
     SemanticModelDocument,
+    AnalyticalObjectDocument,
+    SecurityPrincipalDocument,
     LineageEdgeDocument,
     SpreadsheetWorkbookDocument,
     ArtifactItem,
@@ -29,6 +31,7 @@ from backend.contracts.catalog import (
 from backend.contracts.governance import (
     KpiCandidateDocument,
     KpiMappingDocument,
+    KpiMappingRunDocument,
     MappingApprovalDocument,
     MappingOverrideDocument,
     KpiRationalisationDocument,
@@ -66,11 +69,14 @@ __all__ = [
     "ReportDocument",
     "ReportPageItem",
     "SemanticModelDocument",
+    "AnalyticalObjectDocument",
+    "SecurityPrincipalDocument",
     "SpreadsheetWorkbookDocument",
     "LineageEdgeDocument",
     "ArtifactItem",
     "KpiCandidateDocument",
     "KpiMappingDocument",
+    "KpiMappingRunDocument",
     "MappingApprovalDocument",
     "MappingOverrideDocument",
     "KpiRationalisationDocument",
@@ -87,4 +93,3 @@ __all__ = [
     "IngestionEventDocument",
     "OntologyChangeEventDocument",
 ]
-
