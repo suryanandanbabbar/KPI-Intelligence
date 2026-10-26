@@ -71,14 +71,14 @@ All canonical model deliverables are located in `docs/kpi-intelligence-canonical
 | [`architecture.md`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/docs/kpi-intelligence-canonical-model/architecture.md) | Deliverable E | End-to-end dataflow flowchart, trust boundaries, failure modes, and lifecycle notes. |
 | [`table_inventory.csv`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/docs/kpi-intelligence-canonical-model/table_inventory.csv) | Deliverable F | Machine-readable inventory of all 61 tables with keys, foreign keys, and purposes. |
 | [`implementation_notes.md`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/docs/kpi-intelligence-canonical-model/implementation_notes.md) | Deliverable G | Engineering guidelines, cache invalidation, indexing, RLS, and security rules. |
-| [`remediation_report.md`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/docs/kpi-intelligence-canonical-model/remediation_report.md) | Deliverable 32 | Comprehensive hardening remediation report across Sections A through I. |
-| [`migrations/V002__canonical_model_hardening.sql`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/migrations/V002__canonical_model_hardening.sql) | Migration V2 | Idempotent migration applying hardening constraints, composite FKs, RLS, and triggers. |
+| [`remediation_report.md`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/docs/kpi-intelligence-canonical-model/remediation_report.md) | Deliverable 32 | Comprehensive final corrective patch remediation report across Sections 1 through 10. |
+| [`migrations/V002__canonical_model_hardening.sql`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/migrations/V002__canonical_model_hardening.sql) | Migration V2 | Idempotent migration applying hardening constraints, composite FKs, full RLS, and triggers. |
 | [`fixtures/kpi_bank_representative_fixture.json`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/fixtures/kpi_bank_representative_fixture.json) | Test Fixture | Representative 18-record JSON fixture modeling the complete KPI Bank specification. |
-| [`scripts/kpi_bank_parser.py`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/scripts/kpi_bank_parser.py) | Parser Engine | Production-grade KPI Bank validator, normalizer, and version diff detector. |
+| [`scripts/kpi_bank_parser.py`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/scripts/kpi_bank_parser.py) | Parser Engine | Production-grade KPI Bank validator, normalizer, and 11-field version diff detector. |
 | [`scripts/validate_canonical_model.py`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/scripts/validate_canonical_model.py) | Deliverable H | Comprehensive static and live test suite verifying schema completeness and cross-file integrity. |
-| [`scripts/test_schema_integrity.py`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/scripts/test_schema_integrity.py) | Test Suite | Automated CI/CD test suite checking table counts, column completeness, FKs, RLS, and triggers. |
-| [`scripts/test_kpi_bank_parser.py`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/scripts/test_kpi_bank_parser.py) | Test Suite | 18 unit tests validating parsing, losslessness, error trapping, diffing, and taxonomy independence. |
-| [`scripts/test_db_integration.py`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/scripts/test_db_integration.py) | Test Suite | Live PostgreSQL integration test suite with graceful fallback when DB is absent. |
+| [`scripts/test_schema_integrity.py`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/scripts/test_schema_integrity.py) | Test Suite | Automated CI/CD test suite checking table counts, column completeness, FKs, RLS, and triggers (11 tests). |
+| [`scripts/test_kpi_bank_parser.py`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/scripts/test_kpi_bank_parser.py) | Test Suite | 19 unit tests validating parsing, losslessness, error trapping, diffing, and material field coverage. |
+| [`scripts/test_db_integration.py`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/scripts/test_db_integration.py) | Test Suite | Live PostgreSQL integration test suite (6 live tests, 7 static fallback tests). |
 
 ---
 
@@ -119,25 +119,27 @@ Execute the complete automated test suite locally or in CI/CD:
 # 1. Full schema completeness and cross-file synchronization validator (36 checks)
 python3 scripts/validate_canonical_model.py
 
-# 2. Schema integrity unit test suite (10 test cases)
+# 2. Schema integrity unit test suite (11 test cases)
 python3 scripts/test_schema_integrity.py
 
-# 3. KPI Bank JSON parser and diff engine test suite (18 test cases)
+# 3. KPI Bank JSON parser and diff engine test suite (19 test cases)
 python3 scripts/test_kpi_bank_parser.py
 
-# 4. Live database integration test suite (RLS, cross-tenant rejection, immutability)
+# 4. Live database integration test suite (6 live tests, 7 static fallback tests)
 python3 scripts/test_db_integration.py
 ```
 
 The verification suite validates:
 1. All 61 tables exist in the DDL without additions or renames.
 2. All 632 mandatory columns, types, defaults, and nullable flags exist.
-3. Foreign key creation order and target resolution (108 references checked, including composite FKs).
-4. Row Level Security (RLS) policies and transaction session helper functions.
-5. Immutability triggers on audit tables (`ON DELETE RESTRICT` and `prevent_audit_mutation()`).
-6. All 6 business domains are seeded.
-7. `table_inventory.csv`, `data_dictionary.md`, `er_diagram.md`, and `canonical_schema.sql` are 100% synchronized.
-8. Active ontology version and approval invariants.
+3. Foreign key creation order and target resolution (108 references checked, including composite FKs with column-specific `ON DELETE SET NULL (col)`).
+4. Transaction-local Row Level Security (`FORCE RLS`) across all 55 tenant-scoped tables and helper functions (`set_current_tenant_id` with `p_is_local`, `clear_current_tenant_id`).
+5. Immutability triggers on audit tables (`ON DELETE RESTRICT` and `prevent_audit_mutation()` with `ERRCODE = '42501'`).
+6. Hardened human approval transition state machine (`protect_human_approval()`).
+7. All 6 business domains are seeded.
+8. `table_inventory.csv`, `data_dictionary.md`, `er_diagram.md`, and `canonical_schema.sql` are 100% synchronized.
+9. Active ontology version and approval invariants.
+10. KPI Bank JSON semantic preservation and release diffing across all 11 material fields.
 
 ---
 

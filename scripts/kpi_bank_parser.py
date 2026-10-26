@@ -6,12 +6,17 @@ This module implements the complete parsing, validation, diagnostic, and canonic
 pipeline for the local KPI Ontology Bank JSON resource.
 
 Key Architectural Invariants:
-1. 100% Lossless Source Preservation: Complete original record stored in ontology_payload.
+1. 100% Lossless Semantic Preservation: Complete original record stored in ontology_payload (JSONB).
+   Note: PostgreSQL JSONB guarantees semantic preservation (data types, scalar values, arrays,
+   nested objects, unicode strings), not raw byte-for-byte serialization or key order.
 2. Source Taxonomy vs Application Classification: Source domain (e.g. 'Marketing') is preserved
    verbatim and never conflated with the 6 application business domains.
 3. Multi-Enrichment Integrity: Ordered array of enrichments preserved without flattening.
 4. Structured Diagnostics: Validation produces explicit diagnostics with severity and action.
 5. Deduplication & Provenance: Source identifiers and workbook provenance are preserved.
+6. Comprehensive Semantic Diff Detection: All materially relevant fields (sector, subdomain,
+   line_of_business, kpi_type, domain, status, dimensions, aliases, formula, definition, enrichments)
+   are tracked for release comparison and diff detection.
 """
 
 import json
@@ -162,11 +167,18 @@ class NormalizedKPIEntry:
             "name": self.kpi_name,
             "definition": self.definition,
             "formula": self.formula,
+            "unit": self.unit,
             "aggregation_method": self.aggregation_method,
+            "business_domain": self.business_domain,
+            "source_sector": self.source_sector,
+            "source_subdomain": self.source_subdomain,
+            "source_line_of_business": self.source_line_of_business,
+            "kpi_type": self.kpi_type,
+            "status": self.source_status,
+            "is_active_sector": self.is_active_sector,
             "synonyms": sorted(self.synonyms),
             "valid_dimensions": sorted(self.valid_dimensions),
-            "enrichments": self.enrichments,
-            "status": self.source_status
+            "enrichments": self.enrichments
         }
         hasher.update(json.dumps(key_content, sort_keys=True).encode("utf-8"))
         return hasher.hexdigest()
@@ -437,8 +449,10 @@ class KPIBankParser:
         # 8. Enrichments Array & Provenance Validation
         raw_enrichments = raw_entry.get("enrichments")
         clean_enrichments: List[Dict[str, Any]] = []
-        primary_formula: Optional[str] = None
-        primary_desc: Optional[str] = None
+        top_formula = raw_entry.get("formula") or raw_entry.get("calculation")
+        primary_formula: Optional[str] = top_formula.strip() if isinstance(top_formula, str) and top_formula.strip() else None
+        top_desc = raw_entry.get("metric_description")
+        primary_desc: Optional[str] = top_desc.strip() if isinstance(top_desc, str) and top_desc.strip() else None
 
         if raw_enrichments is not None:
             if isinstance(raw_enrichments, list):
@@ -580,10 +594,21 @@ class KPIVersionDiffDetector:
                         "prior_hash": prior_e.compute_content_hash(),
                         "new_hash": new_e.compute_content_hash(),
                         "changes": {
+                            "name_changed": prior_e.kpi_name != new_e.kpi_name,
                             "definition_changed": prior_e.definition != new_e.definition,
                             "formula_changed": prior_e.formula != new_e.formula,
+                            "unit_changed": prior_e.unit != new_e.unit,
+                            "aggregation_method_changed": prior_e.aggregation_method != new_e.aggregation_method,
+                            "domain_changed": prior_e.business_domain != new_e.business_domain,
+                            "sector_changed": prior_e.source_sector != new_e.source_sector,
+                            "subdomain_changed": prior_e.source_subdomain != new_e.source_subdomain,
+                            "line_of_business_changed": prior_e.source_line_of_business != new_e.source_line_of_business,
+                            "kpi_type_changed": prior_e.kpi_type != new_e.kpi_type,
                             "status_changed": prior_e.source_status != new_e.source_status,
-                            "aliases_changed": sorted(prior_e.synonyms) != sorted(new_e.synonyms)
+                            "active_state_changed": prior_e.is_active_sector != new_e.is_active_sector,
+                            "dimensions_changed": sorted(prior_e.valid_dimensions) != sorted(new_e.valid_dimensions),
+                            "aliases_changed": sorted(prior_e.synonyms) != sorted(new_e.synonyms),
+                            "enrichments_changed": prior_e.enrichments != new_e.enrichments
                         }
                     })
                 else:

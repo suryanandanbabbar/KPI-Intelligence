@@ -611,9 +611,10 @@ erDiagram
 ```
 
 *Relationship Rationales*:
-- `kpi_mappings -> mapping_approvals` ($1:0..N$ with Unique Partial Index): Exactly one active approval is permitted per mapping (`WHERE approval_status = 'APPROVED'`). Protected from automatic overwrites by `trg_protect_human_approval`.
+- `kpi_mappings -> mapping_approvals` ($1:0..N$ with Unique Partial Index): Exactly one active approval is permitted per mapping (`WHERE approval_status = 'APPROVED'`). Protected from automated overwrites and key modifications by `trg_protect_human_approval`. Composite foreign key uses PostgreSQL 15+ column-specific `ON DELETE SET NULL (approved_mapping_candidate_id)`.
+- `kpi_mappings -> mapping_reviews / mapping_overrides`: Composite foreign keys pair optional candidate IDs with mandatory mapping IDs using PostgreSQL 15+ column-specific `ON DELETE SET NULL (mapping_candidate_id)`.
 - `mapping_overrides -> mapping_overrides (supersedes_override_id)` ($1:0..1$): Forms an acyclic lineage chain enforced by `trg_prevent_override_cycle`.
-- `mapping_audit_events` & `ontology_change_events`: Complete immutability enforced at schema layer via `ON DELETE RESTRICT` and `BEFORE UPDATE OR DELETE` triggers.
+- `mapping_audit_events` & `ontology_change_events`: Complete immutability enforced at schema layer via `ON DELETE RESTRICT` and `BEFORE UPDATE OR DELETE` triggers raising `ERRCODE = '42501'` (`insufficient_privilege`). Application role `kpi_app_user` has `UPDATE, DELETE, TRUNCATE` explicitly revoked.
 
 ---
 

@@ -42,10 +42,21 @@ EXCEPTION
 END;
 $$ LANGUAGE plpgsql STABLE;
 
-CREATE OR REPLACE FUNCTION kpi_intel.set_current_tenant_id(p_tenant_id UUID)
+CREATE OR REPLACE FUNCTION kpi_intel.set_current_tenant_id(p_tenant_id UUID, p_is_local BOOLEAN DEFAULT true)
 RETURNS VOID AS $$
 BEGIN
-    PERFORM set_config('kpi_intel.current_tenant_id', p_tenant_id::TEXT, false);
+    IF p_tenant_id IS NULL THEN
+        PERFORM set_config('kpi_intel.current_tenant_id', '', p_is_local);
+    ELSE
+        PERFORM set_config('kpi_intel.current_tenant_id', p_tenant_id::TEXT, p_is_local);
+    END IF;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION kpi_intel.clear_current_tenant_id(p_is_local BOOLEAN DEFAULT true)
+RETURNS VOID AS $$
+BEGIN
+    PERFORM set_config('kpi_intel.current_tenant_id', '', p_is_local);
 END;
 $$ LANGUAGE plpgsql;
 
@@ -53,18 +64,59 @@ CREATE OR REPLACE FUNCTION kpi_intel.prevent_audit_mutation()
 RETURNS TRIGGER AS $$
 BEGIN
     RAISE EXCEPTION 'Audit records in table % are strictly immutable and cannot be updated or deleted.', TG_TABLE_NAME
-        USING ERRCODE = '23505';
+        USING ERRCODE = '42501'; -- insufficient_privilege
 END;
 $$ LANGUAGE plpgsql;
 
 CREATE OR REPLACE FUNCTION kpi_intel.protect_human_approval()
 RETURNS TRIGGER AS $$
 BEGIN
-    IF (OLD.mapping_status = 'APPROVED' OR OLD.decision_source = 'HUMAN')
+    -- 1. Automated mapping engines cannot overwrite human-approved or human-decided mappings
+    IF (OLD.decision_source = 'HUMAN' OR OLD.mapping_status = 'APPROVED')
        AND NEW.decision_source IN ('LLM', 'DETERMINISTIC') THEN
         RAISE EXCEPTION 'Automated mapping runs cannot overwrite human-approved or human-decided mappings (kpi_mapping_id: %)', OLD.kpi_mapping_id
-            USING ERRCODE = '23514';
+            USING ERRCODE = '42501';
     END IF;
+
+    -- 2. Invariant: Structural keys (candidate, asset_version, ontology_version, created_at) are strictly immutable
+    IF NEW.kpi_candidate_id <> OLD.kpi_candidate_id THEN
+        RAISE EXCEPTION 'Cannot modify kpi_candidate_id of an existing mapping (kpi_mapping_id: %)', OLD.kpi_mapping_id
+            USING ERRCODE = '42501';
+    END IF;
+    IF NEW.asset_version_id <> OLD.asset_version_id THEN
+        RAISE EXCEPTION 'Cannot modify asset_version_id of an existing mapping (kpi_mapping_id: %)', OLD.kpi_mapping_id
+            USING ERRCODE = '42501';
+    END IF;
+    IF NEW.ontology_version_id <> OLD.ontology_version_id THEN
+        RAISE EXCEPTION 'Cannot modify ontology_version_id of an existing mapping (kpi_mapping_id: %)', OLD.kpi_mapping_id
+            USING ERRCODE = '42501';
+    END IF;
+    IF NEW.created_at <> OLD.created_at THEN
+        RAISE EXCEPTION 'Cannot modify created_at timestamp of a mapping (kpi_mapping_id: %)', OLD.kpi_mapping_id
+            USING ERRCODE = '42501';
+    END IF;
+
+    -- 3. Transition rules on APPROVED mappings:
+    -- Once APPROVED, mapping status cannot be reverted to PROPOSED or UNMAPPED
+    IF OLD.mapping_status = 'APPROVED' THEN
+        IF NEW.mapping_status IN ('PROPOSED', 'UNMAPPED') THEN
+            RAISE EXCEPTION 'Approved mappings cannot be reset to PROPOSED or UNMAPPED (kpi_mapping_id: %)', OLD.kpi_mapping_id
+                USING ERRCODE = '55000'; -- object_not_in_prerequisite_state
+        END IF;
+
+        -- While remaining in APPROVED status, selected ontology entry cannot be altered directly
+        IF NEW.mapping_status = 'APPROVED' AND NEW.selected_ontology_entry_id IS DISTINCT FROM OLD.selected_ontology_entry_id THEN
+            RAISE EXCEPTION 'Cannot change selected_ontology_entry_id on an APPROVED mapping directly. Use governed review/override supersession workflow (kpi_mapping_id: %)', OLD.kpi_mapping_id
+                USING ERRCODE = '55000';
+        END IF;
+
+        -- Only a human actor can transition an APPROVED mapping to SUPERSEDED, REJECTED, or OVERRIDDEN
+        IF NEW.mapping_status IN ('SUPERSEDED', 'REJECTED', 'OVERRIDDEN') AND NEW.decision_source <> 'HUMAN' THEN
+            RAISE EXCEPTION 'Only human subject matter experts can transition an approved mapping to % (kpi_mapping_id: %)', NEW.mapping_status, OLD.kpi_mapping_id
+                USING ERRCODE = '42501';
+        END IF;
+    END IF;
+
     RETURN NEW;
 END;
 $$ LANGUAGE plpgsql;
@@ -941,7 +993,7 @@ CREATE TABLE kpi_intel.kpi_mappings (
     CONSTRAINT uq_kpi_mappings_tenant UNIQUE (kpi_mapping_id, tenant_id),
     CONSTRAINT fk_kpi_mappings_candidate_version FOREIGN KEY (kpi_candidate_id, asset_version_id) REFERENCES kpi_intel.kpi_candidates(kpi_candidate_id, asset_version_id) ON DELETE CASCADE,
     CONSTRAINT fk_kpi_mappings_run_version FOREIGN KEY (mapping_run_id, asset_version_id, ontology_version_id) REFERENCES kpi_intel.kpi_mapping_runs(mapping_run_id, asset_version_id, ontology_version_id) ON DELETE CASCADE,
-    CONSTRAINT fk_kpi_mappings_selected_ontology_entry FOREIGN KEY (selected_ontology_entry_id, ontology_version_id) REFERENCES kpi_intel.kpi_ontology_entries(ontology_entry_id, ontology_version_id) ON DELETE SET NULL
+    CONSTRAINT fk_kpi_mappings_selected_ontology_entry FOREIGN KEY (selected_ontology_entry_id, ontology_version_id) REFERENCES kpi_intel.kpi_ontology_entries(ontology_entry_id, ontology_version_id) ON DELETE SET NULL (selected_ontology_entry_id)
 );
 
 CREATE TRIGGER trg_kpi_mappings_updated_at
@@ -1019,7 +1071,7 @@ CREATE TABLE kpi_intel.mapping_reviews (
     created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp(),
     CONSTRAINT ck_mapping_reviews_action CHECK (review_action IN ('APPROVE', 'REJECT', 'CHOOSE_ANOTHER', 'ADD_KPI', 'REQUEST_REMAPPING', 'MARK_UNMAPPED')),
     CONSTRAINT ck_mapping_reviews_status CHECK (review_status IN ('PENDING', 'COMPLETED', 'WITHDRAWN')),
-    CONSTRAINT fk_mapping_reviews_candidate_mapping FOREIGN KEY (mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_intel.kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id) ON DELETE SET NULL
+    CONSTRAINT fk_mapping_reviews_candidate_mapping FOREIGN KEY (mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_intel.kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id) ON DELETE SET NULL (mapping_candidate_id)
 );
 
 -- 50. mapping_approvals
@@ -1035,7 +1087,7 @@ CREATE TABLE kpi_intel.mapping_approvals (
     revoked_at TIMESTAMPTZ,
     revocation_reason TEXT,
     CONSTRAINT ck_mapping_approvals_status CHECK (approval_status IN ('APPROVED', 'REVOKED', 'SUPERSEDED')),
-    CONSTRAINT fk_mapping_approvals_candidate_mapping FOREIGN KEY (approved_mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_intel.kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id) ON DELETE SET NULL
+    CONSTRAINT fk_mapping_approvals_candidate_mapping FOREIGN KEY (approved_mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_intel.kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id) ON DELETE SET NULL (approved_mapping_candidate_id)
 );
 
 -- Enforce exactly one active approval per mapping
@@ -1061,7 +1113,7 @@ CREATE TABLE kpi_intel.mapping_overrides (
     supersedes_override_id UUID REFERENCES kpi_intel.mapping_overrides(override_id) ON DELETE SET NULL,
     CONSTRAINT ck_mapping_overrides_type CHECK (override_type IN ('REJECT', 'SELECT_ALTERNATIVE', 'ADD_KPI', 'FORCE_UNMAPPED', 'REMAP', 'OTHER')),
     CONSTRAINT ck_mapping_overrides_justification_not_empty CHECK (length(trim(override_justification)) > 0),
-    CONSTRAINT fk_mapping_overrides_candidate_mapping FOREIGN KEY (mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_intel.kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id) ON DELETE SET NULL
+    CONSTRAINT fk_mapping_overrides_candidate_mapping FOREIGN KEY (mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_intel.kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id) ON DELETE SET NULL (mapping_candidate_id)
 );
 
 CREATE TRIGGER trg_prevent_override_cycle
@@ -1355,86 +1407,377 @@ CREATE INDEX idx_ontology_change_events_version ON kpi_intel.ontology_change_eve
 
 
 -- ============================================================================
--- 4. ROW-LEVEL SECURITY (RLS) POLICIES
+-- 4. ROW-LEVEL SECURITY (RLS) POLICIES (COMPLETE 61-TABLE COVERAGE)
 -- ============================================================================
 
--- Enable RLS on all tenant-owned root tables
+-- 4.1 Tenant-Owned Root Tables (Direct tenant_id check)
 ALTER TABLE kpi_intel.assets ENABLE ROW LEVEL SECURITY;
-ALTER TABLE kpi_intel.security_principals ENABLE ROW LEVEL SECURITY;
-ALTER TABLE kpi_intel.asset_versions ENABLE ROW LEVEL SECURITY;
-ALTER TABLE kpi_intel.analytical_objects ENABLE ROW LEVEL SECURITY;
-ALTER TABLE kpi_intel.kpi_candidates ENABLE ROW LEVEL SECURITY;
-ALTER TABLE kpi_intel.kpi_mapping_runs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE kpi_intel.kpi_mappings ENABLE ROW LEVEL SECURITY;
-ALTER TABLE kpi_intel.domain_classifications ENABLE ROW LEVEL SECURITY;
-ALTER TABLE kpi_intel.metadata_field_reviews ENABLE ROW LEVEL SECURITY;
-ALTER TABLE kpi_intel.parser_runs ENABLE ROW LEVEL SECURITY;
-ALTER TABLE kpi_intel.mapping_audit_events ENABLE ROW LEVEL SECURITY;
-
--- Root table tenant policies
+ALTER TABLE kpi_intel.assets FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation_policy_assets ON kpi_intel.assets
 FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
 
+ALTER TABLE kpi_intel.security_principals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.security_principals FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation_policy_principals ON kpi_intel.security_principals
 FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
 
+ALTER TABLE kpi_intel.asset_versions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.asset_versions FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation_policy_versions ON kpi_intel.asset_versions
 FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
 
+ALTER TABLE kpi_intel.analytical_objects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.analytical_objects FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation_policy_objects ON kpi_intel.analytical_objects
 FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
 
+ALTER TABLE kpi_intel.kpi_candidates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.kpi_candidates FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation_policy_candidates ON kpi_intel.kpi_candidates
 FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
 
+ALTER TABLE kpi_intel.kpi_mapping_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.kpi_mapping_runs FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation_policy_mapping_runs ON kpi_intel.kpi_mapping_runs
 FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
 
+ALTER TABLE kpi_intel.kpi_mappings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.kpi_mappings FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation_policy_mappings ON kpi_intel.kpi_mappings
 FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
 
+ALTER TABLE kpi_intel.domain_classifications ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.domain_classifications FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation_policy_domain_class ON kpi_intel.domain_classifications
 FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
 
+ALTER TABLE kpi_intel.metadata_field_reviews ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.metadata_field_reviews FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation_policy_field_reviews ON kpi_intel.metadata_field_reviews
 FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
 
+ALTER TABLE kpi_intel.parser_runs ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.parser_runs FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation_policy_parser_runs ON kpi_intel.parser_runs
 FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
 
+ALTER TABLE kpi_intel.mapping_audit_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.mapping_audit_events FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation_policy_audit_events ON kpi_intel.mapping_audit_events
 FOR ALL USING (tenant_id = kpi_intel.current_tenant_id());
 
--- Enable RLS on child tables to prevent direct bypass queries
+-- 4.2 Tenant-Owned Child Tables: Subsystem A (Asset Registry)
+ALTER TABLE kpi_intel.ingestion_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.ingestion_events FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_ingestion_events ON kpi_intel.ingestion_events
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.asset_versions av 
+    WHERE av.asset_version_id = ingestion_events.asset_version_id AND av.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.source_artifacts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.source_artifacts FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_source_artifacts ON kpi_intel.source_artifacts
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.asset_versions av 
+    WHERE av.asset_version_id = source_artifacts.asset_version_id AND av.tenant_id = kpi_intel.current_tenant_id()
+));
+
+-- 4.3 Tenant-Owned Child Tables: Subsystem B (Universal Analytical Objects)
 ALTER TABLE kpi_intel.reports ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.reports FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation_policy_reports ON kpi_intel.reports
 FOR ALL USING (EXISTS (
     SELECT 1 FROM kpi_intel.analytical_objects ao 
     WHERE ao.object_id = reports.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
 ));
 
-ALTER TABLE kpi_intel.calculations ENABLE ROW LEVEL SECURITY;
-CREATE POLICY tenant_isolation_policy_calculations ON kpi_intel.calculations
+ALTER TABLE kpi_intel.report_pages ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.report_pages FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_report_pages ON kpi_intel.report_pages
 FOR ALL USING (EXISTS (
     SELECT 1 FROM kpi_intel.analytical_objects ao 
-    WHERE ao.object_id = calculations.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+    WHERE ao.object_id = report_pages.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.visuals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.visuals FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_visuals ON kpi_intel.visuals
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = visuals.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.visual_bindings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.visual_bindings FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_visual_bindings ON kpi_intel.visual_bindings
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = visual_bindings.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.visual_properties ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.visual_properties FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_visual_properties ON kpi_intel.visual_properties
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.visuals v 
+    JOIN kpi_intel.analytical_objects ao ON v.object_id = ao.object_id
+    WHERE v.visual_id = visual_properties.visual_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.visual_interactions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.visual_interactions FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_visual_interactions ON kpi_intel.visual_interactions
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.visuals v 
+    JOIN kpi_intel.analytical_objects ao ON v.object_id = ao.object_id
+    WHERE v.visual_id = visual_interactions.source_visual_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.bookmarks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.bookmarks FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_bookmarks ON kpi_intel.bookmarks
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = bookmarks.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.report_navigation ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.report_navigation FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_report_navigation ON kpi_intel.report_navigation
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = report_navigation.source_object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+-- 4.4 Tenant-Owned Child Tables: Subsystem C (Semantic Models & Calculations)
+ALTER TABLE kpi_intel.semantic_models ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.semantic_models FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_semantic_models ON kpi_intel.semantic_models
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = semantic_models.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
 ));
 
 ALTER TABLE kpi_intel.data_tables ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.data_tables FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation_policy_data_tables ON kpi_intel.data_tables
 FOR ALL USING (EXISTS (
     SELECT 1 FROM kpi_intel.analytical_objects ao 
     WHERE ao.object_id = data_tables.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
 ));
 
+ALTER TABLE kpi_intel.data_columns ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.data_columns FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_data_columns ON kpi_intel.data_columns
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = data_columns.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.calculations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.calculations FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_calculations ON kpi_intel.calculations
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = calculations.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.relationships ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.relationships FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_relationships ON kpi_intel.relationships
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = relationships.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.model_partitions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.model_partitions FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_model_partitions ON kpi_intel.model_partitions
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.semantic_models sm
+    JOIN kpi_intel.analytical_objects ao ON sm.object_id = ao.object_id
+    WHERE sm.semantic_model_id = model_partitions.semantic_model_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.hierarchies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.hierarchies FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_hierarchies ON kpi_intel.hierarchies
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = hierarchies.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.hierarchy_levels ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.hierarchy_levels FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_hierarchy_levels ON kpi_intel.hierarchy_levels
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = hierarchy_levels.level_object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.parameters ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.parameters FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_parameters ON kpi_intel.parameters
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = parameters.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.named_expressions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.named_expressions FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_named_expressions ON kpi_intel.named_expressions
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = named_expressions.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+-- 4.5 Tenant-Owned Child Tables: Subsystem D (Filters, Security, Lineage)
+ALTER TABLE kpi_intel.filters ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.filters FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_filters ON kpi_intel.filters
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = filters.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.filter_assignments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.filter_assignments FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_filter_assignments ON kpi_intel.filter_assignments
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.filters f
+    JOIN kpi_intel.analytical_objects ao ON f.object_id = ao.object_id
+    WHERE f.filter_id = filter_assignments.filter_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.security_roles ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.security_roles FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_security_roles ON kpi_intel.security_roles
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = security_roles.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.security_role_filters ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.security_role_filters FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_security_role_filters ON kpi_intel.security_role_filters
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.security_roles sr
+    JOIN kpi_intel.analytical_objects ao ON sr.object_id = ao.object_id
+    WHERE sr.security_role_id = security_role_filters.security_role_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.security_object_permissions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.security_object_permissions FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_sec_obj_perms ON kpi_intel.security_object_permissions
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = security_object_permissions.target_object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.data_sources ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.data_sources FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_data_sources ON kpi_intel.data_sources
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = data_sources.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.query_dependencies ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.query_dependencies FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_query_dependencies ON kpi_intel.query_dependencies
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = query_dependencies.source_object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.metadata_lineage_edges ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.metadata_lineage_edges FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_metadata_lineage_edges ON kpi_intel.metadata_lineage_edges
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.asset_versions av 
+    WHERE av.asset_version_id = metadata_lineage_edges.asset_version_id AND av.tenant_id = kpi_intel.current_tenant_id()
+));
+
+-- 4.6 Tenant-Owned Child Tables: Subsystem E (Excel Metadata)
+ALTER TABLE kpi_intel.spreadsheet_cells ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.spreadsheet_cells FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_spreadsheet_cells ON kpi_intel.spreadsheet_cells
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = spreadsheet_cells.worksheet_object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.pivot_caches ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.pivot_caches FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_pivot_caches ON kpi_intel.pivot_caches
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.asset_versions av 
+    WHERE av.asset_version_id = pivot_caches.asset_version_id AND av.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.pivot_tables ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.pivot_tables FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_pivot_tables ON kpi_intel.pivot_tables
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = pivot_tables.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.pivot_field_assignments ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.pivot_field_assignments FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_pivot_field_assignments ON kpi_intel.pivot_field_assignments
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.pivot_tables pt
+    JOIN kpi_intel.analytical_objects ao ON pt.object_id = ao.object_id
+    WHERE pt.pivot_table_id = pivot_field_assignments.pivot_table_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.spreadsheet_objects ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.spreadsheet_objects FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_spreadsheet_objects ON kpi_intel.spreadsheet_objects
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = spreadsheet_objects.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.spreadsheet_rules ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.spreadsheet_rules FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_spreadsheet_rules ON kpi_intel.spreadsheet_rules
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao 
+    WHERE ao.object_id = spreadsheet_rules.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+-- 4.7 Tenant-Owned Child Tables: Subsystem G (KPI Candidates & Mapping)
 ALTER TABLE kpi_intel.kpi_mapping_candidates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.kpi_mapping_candidates FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation_policy_map_cands ON kpi_intel.kpi_mapping_candidates
 FOR ALL USING (EXISTS (
     SELECT 1 FROM kpi_intel.kpi_mappings km 
     WHERE km.kpi_mapping_id = kpi_mapping_candidates.kpi_mapping_id AND km.tenant_id = kpi_intel.current_tenant_id()
 ));
 
+ALTER TABLE kpi_intel.mapping_evidence ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.mapping_evidence FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_mapping_evidence ON kpi_intel.mapping_evidence
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.kpi_mapping_candidates kmc
+    JOIN kpi_intel.kpi_mappings km ON kmc.kpi_mapping_id = km.kpi_mapping_id
+    WHERE kmc.mapping_candidate_id = mapping_evidence.mapping_candidate_id AND km.tenant_id = kpi_intel.current_tenant_id()
+));
+
+-- 4.8 Tenant-Owned Child Tables: Subsystem H (Human Review, Approval, Overrides)
+ALTER TABLE kpi_intel.mapping_reviews ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.mapping_reviews FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_mapping_reviews ON kpi_intel.mapping_reviews
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.kpi_mappings km 
+    WHERE km.kpi_mapping_id = mapping_reviews.kpi_mapping_id AND km.tenant_id = kpi_intel.current_tenant_id()
+));
+
 ALTER TABLE kpi_intel.mapping_approvals ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.mapping_approvals FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation_policy_approvals ON kpi_intel.mapping_approvals
 FOR ALL USING (EXISTS (
     SELECT 1 FROM kpi_intel.kpi_mappings km 
@@ -1442,13 +1785,57 @@ FOR ALL USING (EXISTS (
 ));
 
 ALTER TABLE kpi_intel.mapping_overrides ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.mapping_overrides FORCE ROW LEVEL SECURITY;
 CREATE POLICY tenant_isolation_policy_overrides ON kpi_intel.mapping_overrides
 FOR ALL USING (EXISTS (
     SELECT 1 FROM kpi_intel.kpi_mappings km 
     WHERE km.kpi_mapping_id = mapping_overrides.kpi_mapping_id AND km.tenant_id = kpi_intel.current_tenant_id()
 ));
 
--- Global reference tables have public/authenticated read-only policy
+-- 4.9 Tenant-Owned Child Tables: Subsystem I (KPI Rationalisation)
+ALTER TABLE kpi_intel.kpi_equivalence_candidates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.kpi_equivalence_candidates FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_equiv_cands ON kpi_intel.kpi_equivalence_candidates
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.kpi_candidates kc
+    WHERE kc.kpi_candidate_id = kpi_equivalence_candidates.source_kpi_candidate_id AND kc.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.kpi_rationalisation_decisions ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.kpi_rationalisation_decisions FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_rat_decisions ON kpi_intel.kpi_rationalisation_decisions
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.kpi_candidates kc
+    WHERE kc.kpi_candidate_id = kpi_rationalisation_decisions.canonical_kpi_candidate_id AND kc.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.rationalisation_evidence ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.rationalisation_evidence FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_rat_evidence ON kpi_intel.rationalisation_evidence
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.kpi_rationalisation_decisions rd
+    JOIN kpi_intel.kpi_candidates kc ON rd.canonical_kpi_candidate_id = kc.kpi_candidate_id
+    WHERE rd.rationalisation_decision_id = rationalisation_evidence.rationalisation_decision_id AND kc.tenant_id = kpi_intel.current_tenant_id()
+));
+
+-- 4.10 Tenant-Owned Child Tables: Subsystem J (Operations & Tagging)
+ALTER TABLE kpi_intel.extraction_errors ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.extraction_errors FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_extraction_errors ON kpi_intel.extraction_errors
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.parser_runs pr
+    WHERE pr.parser_run_id = extraction_errors.parser_run_id AND pr.tenant_id = kpi_intel.current_tenant_id()
+));
+
+ALTER TABLE kpi_intel.object_tags ENABLE ROW LEVEL SECURITY;
+ALTER TABLE kpi_intel.object_tags FORCE ROW LEVEL SECURITY;
+CREATE POLICY tenant_isolation_policy_object_tags ON kpi_intel.object_tags
+FOR ALL USING (EXISTS (
+    SELECT 1 FROM kpi_intel.analytical_objects ao
+    WHERE ao.object_id = object_tags.object_id AND ao.tenant_id = kpi_intel.current_tenant_id()
+));
+
+-- 4.11 Globally Shared Reference Tables (Global read-only access)
 ALTER TABLE kpi_intel.business_domains ENABLE ROW LEVEL SECURITY;
 CREATE POLICY global_read_domains ON kpi_intel.business_domains FOR SELECT USING (true);
 
@@ -1463,6 +1850,32 @@ CREATE POLICY global_read_ontology_versions ON kpi_intel.kpi_ontology_versions F
 
 ALTER TABLE kpi_intel.kpi_ontology_entries ENABLE ROW LEVEL SECURITY;
 CREATE POLICY global_read_ontology_entries ON kpi_intel.kpi_ontology_entries FOR SELECT USING (true);
+
+-- 4.12 System Operational Audit Table (Global ledger read access)
+ALTER TABLE kpi_intel.ontology_change_events ENABLE ROW LEVEL SECURITY;
+CREATE POLICY global_read_ontology_change_events ON kpi_intel.ontology_change_events FOR SELECT USING (true);
+
+-- 4.13 Application Roles & Privileges Model
+DO $$
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'kpi_app_user') THEN
+        CREATE ROLE kpi_app_user WITH NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'kpi_readonly') THEN
+        CREATE ROLE kpi_readonly WITH NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOBYPASSRLS;
+    END IF;
+END $$;
+
+GRANT USAGE ON SCHEMA kpi_intel TO kpi_app_user, kpi_readonly;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA kpi_intel TO kpi_app_user;
+REVOKE UPDATE, DELETE, TRUNCATE ON kpi_intel.mapping_audit_events, kpi_intel.ontology_change_events FROM kpi_app_user, PUBLIC;
+GRANT SELECT, INSERT ON kpi_intel.mapping_audit_events, kpi_intel.ontology_change_events TO kpi_app_user;
+
+GRANT SELECT ON ALL TABLES IN SCHEMA kpi_intel TO kpi_readonly;
+
+GRANT EXECUTE ON FUNCTION kpi_intel.current_tenant_id() TO kpi_app_user, kpi_readonly;
+GRANT EXECUTE ON FUNCTION kpi_intel.set_current_tenant_id(UUID, BOOLEAN) TO kpi_app_user;
+GRANT EXECUTE ON FUNCTION kpi_intel.clear_current_tenant_id(BOOLEAN) TO kpi_app_user;
 
 
 -- ============================================================================

@@ -20,9 +20,15 @@ This document provides architectural guidance, operational protocols, database i
   * Deleting an operational `kpi_mappings` row is strictly **prohibited** if audit events exist (`mapping_audit_events.kpi_mapping_id` uses `ON DELETE RESTRICT`).
   * Deleting an ontology version is strictly **prohibited** if ontology change logs exist (`ontology_change_events.ontology_version_id` uses `ON DELETE RESTRICT`).
   * Audit records retain snapshot identifiers (`target_kpi_mapping_id UUID NOT NULL`) ensuring permanent traceability even across lifecycle transitions.
-- **Audit & Governance Preservation (`ON DELETE SET NULL`)**:
+- **Audit & Governance Preservation (`ON DELETE SET NULL`) & Column-Specific Syntax**:
   * Deleting a user does not delete approvals or audit history (`approved_by_user_id` is retained).
   * Deleting a target object sets foreign keys to `NULL` in `query_dependencies` and `mapping_evidence` to preserve historical evidence integrity.
+  * **Composite Foreign Keys with Column-Specific `ON DELETE SET NULL` (PostgreSQL 15+)**:
+    When a composite foreign key pairs a nullable column with a `NOT NULL` column, standard PostgreSQL `ON DELETE SET NULL` attempts to set *all* referencing columns to NULL, which immediately violates the `NOT NULL` constraint and aborts the transaction. In PostgreSQL 15+, column-specific syntax is utilized to only nullify the nullable referencing column while preserving the immutable parent link:
+    - `kpi_mappings`: `FOREIGN KEY (selected_ontology_entry_id, ontology_version_id) REFERENCES kpi_ontology_entries (...) ON DELETE SET NULL (selected_ontology_entry_id)` (preserves `ontology_version_id`).
+    - `mapping_approvals`: `FOREIGN KEY (approved_mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_mapping_candidates (...) ON DELETE SET NULL (approved_mapping_candidate_id)` (preserves `kpi_mapping_id`).
+    - `mapping_reviews`: `FOREIGN KEY (mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_mapping_candidates (...) ON DELETE SET NULL (mapping_candidate_id)` (preserves `kpi_mapping_id`).
+    - `mapping_overrides`: `FOREIGN KEY (mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_mapping_candidates (...) ON DELETE SET NULL (mapping_candidate_id)` (preserves `kpi_mapping_id`).
 - **Circular Foreign Key Management**:
   * `assets.current_version_id` points to `asset_versions.asset_version_id`, while `asset_versions.asset_id` points to `assets.asset_id`.
   * To resolve this cleanly during DDL execution, `assets` is created first without the foreign key constraint, `asset_versions` is created second, and the circular constraint `fk_assets_current_version` is applied via `ALTER TABLE ... ADD CONSTRAINT ... FOREIGN KEY ... ON DELETE SET NULL`.
@@ -75,40 +81,75 @@ This document provides architectural guidance, operational protocols, database i
 
 ## 2. Multi-Tenant Isolation & Access Control
 
-### 2.1 Tenant Boundary Architecture
-The canonical model implements defense-in-depth tenant isolation across three tiers:
-1. **Explicit Transaction-Scoped Session Resolution**:
-   - Tenant context is set securely via `kpi_intel.set_current_tenant_id(UUID)` at transaction start:
-     ```sql
-     SELECT kpi_intel.set_current_tenant_id('11111111-1111-1111-1111-111111111111'::uuid);
-     -- Or via standard session setting:
-     SET LOCAL kpi_intel.current_tenant_id = '11111111-1111-1111-1111-111111111111';
-     ```
-   - Helper function `kpi_intel.current_tenant_id()` retrieves the session UUID and raises an explicit error if missing, blocking untrusted queries from running in a global context.
-2. **Row-Level Security (RLS) on Operational Tables**:
-   - Enabled on all operational metadata roots:
+### 2.1 Tenant Boundary Architecture & Trust Model
+The canonical model implements defense-in-depth tenant isolation across four distinct layers:
+
+1. **Transaction-Local Context Lifecycle & Pool Reuse**:
+   - **Transaction-Local Setting (`is_local = true`)**: `kpi_intel.set_current_tenant_id(p_tenant_id UUID, p_is_local BOOLEAN DEFAULT true)` sets the context scoped strictly to the current database transaction (`set_config('kpi_intel.current_tenant_id', ..., true)`).
+   - **Connection Pool Safety (PgBouncer, HikariCP)**: Upon `COMMIT` or `ROLLBACK`, PostgreSQL automatically clears transaction-local configuration parameters. When a connection is returned to the pool or reused for a subsequent request, no leftover tenant context can leak across tenant boundaries.
+   - **Missing Context Fails Closed**: `kpi_intel.current_tenant_id()` returns `NULL` if unset or cleared. Under SQL boolean logic, `tenant_id = NULL` evaluates to `NULL` (falsy), immediately blocking all reads and writes across all tenant-scoped tables.
+   - **Trust Model & Authorization Boundary**:
+     > [!IMPORTANT]
+     > A custom PostgreSQL setting is an **authorization context / execution parameter**, NOT an authentication mechanism.
+     > Untrusted clients (external end-users, direct web traffic) must NEVER have direct PostgreSQL connection access or permission to invoke `set_current_tenant_id`. The application backend serves as the trusted Policy Enforcement Point (PEP): it authenticates the user (via JWT/OAuth2), verifies tenant authorization, opens a database transaction, and sets the transaction-local tenant context.
+
+2. **Complete 61-Table Row-Level Security (RLS) Coverage**:
+   All 61 tables in the canonical schema have RLS enabled and explicitly defined:
+   - **11 Tenant-Owned Root Tables**: Protected by direct column check `tenant_id = kpi_intel.current_tenant_id()`:
      `assets`, `security_principals`, `asset_versions`, `analytical_objects`, `kpi_candidates`, `kpi_mapping_runs`, `kpi_mappings`, `domain_classifications`, `metadata_field_reviews`, `parser_runs`, `mapping_audit_events`.
-   - Enabled on child tables via relational parent joins (e.g., `reports`, `calculations`, `data_tables`, `kpi_mapping_candidates`, `mapping_approvals`, `mapping_overrides`).
-   - Global reference tables (`business_domains`, `visual_types`, `platform_capabilities`, `kpi_ontology_versions`, `kpi_ontology_entries`) provide authenticated read-only access (`FOR SELECT USING (true)`).
-3. **Composite Foreign Key Boundary Invariants**:
-   - Multi-column foreign keys ensure cross-tenant referencing is physically rejected by the database constraint engine:
-     * `(asset_id, tenant_id) REFERENCES assets(asset_id, tenant_id)`
-     * `(asset_version_id, tenant_id) REFERENCES asset_versions(asset_version_id, tenant_id)`
-     * `(source_object_id, asset_version_id) REFERENCES analytical_objects(object_id, asset_version_id)`
-     * `(kpi_candidate_id, asset_version_id) REFERENCES kpi_candidates(kpi_candidate_id, asset_version_id)`
-     * `(mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id)`
-     * `(approved_mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id)`
+   - **44 Tenant-Owned Child Tables**: Protected by parent-derived existence queries (`EXISTS (SELECT 1 FROM parent WHERE parent.tenant_id = kpi_intel.current_tenant_id())`):
+     *Subsystem A*: `ingestion_events`, `source_artifacts`.  
+     *Subsystem B*: `reports`, `report_pages`, `visuals`, `visual_bindings`, `visual_properties`, `visual_interactions`, `bookmarks`, `report_navigation`.  
+     *Subsystem C*: `semantic_models`, `data_tables`, `data_columns`, `calculations`, `relationships`, `model_partitions`, `hierarchies`, `hierarchy_levels`, `parameters`, `named_expressions`.  
+     *Subsystem D*: `filters`, `filter_assignments`, `security_roles`, `security_role_filters`, `security_object_permissions`, `data_sources`, `query_dependencies`, `metadata_lineage_edges`.  
+     *Subsystem E*: `spreadsheet_cells`, `pivot_caches`, `pivot_tables`, `pivot_field_assignments`, `spreadsheet_objects`, `spreadsheet_rules`.  
+     *Subsystem G*: `kpi_mapping_candidates`, `mapping_evidence`.  
+     *Subsystem H*: `mapping_reviews`, `mapping_approvals`, `mapping_overrides`.  
+     *Subsystem I*: `kpi_equivalence_candidates`, `kpi_rationalisation_decisions`, `rationalisation_evidence`.  
+     *Subsystem J*: `extraction_errors`, `object_tags`.  
+   - **5 Globally Shared Reference Tables**: Read-only access across all tenants (`FOR SELECT USING (true)`):
+     `business_domains`, `visual_types`, `platform_capabilities`, `kpi_ontology_versions`, `kpi_ontology_entries`.
+   - **1 System-Owned Operational Table**: Append-only global ledger with read access:
+     `ontology_change_events`.
+
+3. **`ENABLE` vs. `FORCE ROW LEVEL SECURITY` & Privileged Role Bypass**:
+   - `ENABLE ROW LEVEL SECURITY`: Applies RLS policies to normal database roles, but table owners bypass policies by default.
+   - `FORCE ROW LEVEL SECURITY`: Enforces RLS policies unconditionally, even when a query is executed by the table owner. All 55 tenant-scoped tables are configured with `FORCE ROW LEVEL SECURITY`.
+   - **Superuser and `BYPASSRLS` Bypass Rule**: In PostgreSQL, superuser roles and roles created with the `BYPASSRLS` attribute *always bypass RLS policies unconditionally*. Therefore, application connection pools must connect using a dedicated non-superuser role (`kpi_app_user`) created with `NOSUPERUSER NOBYPASSRLS`.
+
+4. **Application Roles & Least-Privilege Grants**:
+   - **`kpi_app_user`**: Standard application connection pool role.
+     * Granted `USAGE` on schema `kpi_intel`.
+     * Granted `SELECT, INSERT, UPDATE, DELETE` on operational tables.
+     * **Strictly restricted on audit tables**: `REVOKE UPDATE, DELETE, TRUNCATE ON mapping_audit_events, ontology_change_events FROM kpi_app_user, PUBLIC;` and `GRANT SELECT, INSERT ON mapping_audit_events, ontology_change_events TO kpi_app_user;`.
+   - **`kpi_readonly`**: Reporting and analytics role with `SELECT` permissions only.
+
+5. **Composite Foreign Key Boundary Invariants**:
+   Multi-column foreign keys ensure cross-tenant referencing is physically rejected by the database constraint engine:
+   - `(asset_id, tenant_id) REFERENCES assets(asset_id, tenant_id)`
+   - `(asset_version_id, tenant_id) REFERENCES asset_versions(asset_version_id, tenant_id)`
+   - `(source_object_id, asset_version_id) REFERENCES analytical_objects(object_id, asset_version_id)`
+   - `(kpi_candidate_id, asset_version_id) REFERENCES kpi_candidates(kpi_candidate_id, asset_version_id)`
+   - `(mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id)`
+   - `(approved_mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id)`
 
 ### 2.2 Immutable Governance & Integrity Triggers
-1. **`trg_protect_human_approval`**:
-   - Attached to `kpi_mappings`.
-   - Prohibits automated engines from overwriting or changing mappings that were approved by human stewards (`decision_source = 'HUMAN'` and `mapping_status = 'APPROVED'`).
+
+1. **`trg_protect_human_approval` (Comprehensive Transition Rules)**:
+   - **Prohibited Automated Actions**: Automated engines (`decision_source IN ('LLM', 'DETERMINISTIC')`) are strictly prohibited from:
+     * Overwriting or mutating any mapping where `OLD.decision_source = 'HUMAN'` or `OLD.mapping_status = 'APPROVED'` (raises SQLSTATE `42501`).
+     * Changing `selected_ontology_entry_id` of an approved mapping directly.
+     * Resetting `mapping_status` from `APPROVED` back to `PROPOSED` or `UNMAPPED` (raises SQLSTATE `55000`).
+     * Mutating structural relational keys: `kpi_candidate_id`, `asset_version_id`, `ontology_version_id`, or `created_at` (raises SQLSTATE `42501`).
+   - **Permitted Human Transitions**: Only an authenticated human steward (`decision_source = 'HUMAN'`) can transition an approved mapping to `SUPERSEDED`, `REJECTED`, or `OVERRIDDEN`. The prior approval row in `mapping_approvals` is marked `SUPERSEDED` or `REVOKED` with `revoked_at` and `revocation_reason`, and a new audit event is logged.
+
 2. **`trg_mapping_audit_immutable` & `trg_ontology_audit_immutable`**:
    - Attached to `mapping_audit_events` and `ontology_change_events`.
-   - Prohibits all `UPDATE` and `DELETE` operations on audit tables, guaranteeing tamper-proof, append-only ledgers.
+   - Prohibits all `UPDATE` and `DELETE` operations on audit tables using standard SQLSTATE `42501` (`insufficient_privilege`), guaranteeing tamper-proof, append-only ledgers.
+
 3. **`trg_prevent_override_cycle`**:
    - Attached to `mapping_overrides`.
-   - Recursively verifies the `supersedes_override_id` chain to prevent cyclic or self-referential override loops.
+   - Recursively verifies the `supersedes_override_id` chain to prevent cyclic or self-referential override loops (raises SQLSTATE `23514`).
 
 ---
 
@@ -196,6 +237,28 @@ sequenceDiagram
 *Recovery Handling*:
 - If database write fails after file update, the application recovery service detects that `local_file.content_hash != db_active_version.content_hash` on startup, enters auto-reconciliation, and replays the database transaction from the local JSON file.
 
+### 5.3 JSONB Semantic Preservation vs. Raw Byte-for-Byte Serialization
+- **Semantic Preservation Guarantee**: The canonical model stores the raw original JSON entry in `kpi_ontology_entries.ontology_payload` typed as `JSONB`. PostgreSQL's `JSONB` data type guarantees **100% semantic fidelity**:
+  * Scalar data types (integers, floats, strings, booleans, nulls) are preserved without coercion.
+  * Unicode and special characters are preserved verbatim.
+  * Complex nested structures, arrays, and multi-team enrichment objects retain complete structural hierarchy.
+- **Byte Serialization vs. Semantic Storage**:
+  * `JSONB` parses JSON into a decomposed binary format: it strips insignificant source whitespace, normalizes object key ordering (by length and binary value), and deduplicates duplicate dictionary keys (keeping the last value per JSON specification).
+  * Consequently, `JSONB` guarantees semantic data preservation, NOT identical byte-for-byte serialization or raw whitespace formatting. For metadata governance and analytical search, binary semantic storage is superior, performant, and indexing-capable.
+- **Comprehensive Release Diff Detection**:
+  The `KPIVersionDiffDetector` engine tracks semantic evolution between ontology releases across all 11 materially relevant business fields:
+  1. `source_sector` (`sector`)
+  2. `source_subdomain` (`subdomain`)
+  3. `source_line_of_business` (`line_of_business`)
+  4. `kpi_type` (`kpi_type`)
+  5. `business_domain` (`domain`)
+  6. `source_status` & `is_active_sector` (`status`, `is_active_sector`)
+  7. `valid_dimensions`
+  8. `synonyms` (`aliases`)
+  9. `formula` (top-level or enrichment calculation)
+  10. `definition`
+  11. `enrichments` (ordered team-level metadata, field sources, and extra properties)
+
 ---
 
 ## 6. Mapping Cache & Fingerprint Invalidation
@@ -233,10 +296,20 @@ When a candidate is evaluated, the system queries historical human decisions usi
 
 ## 8. Database Migrations, Versioning & Operational Maintenance
 
-### 8.1 Repeatable Migration Strategy
-- DDL scripts are versioned sequentially:
-  `migrations/V001__canonical_kpi_intelligence_schema.sql`, `migrations/V002__...`
-- Migrations must be idempotent, wrapping changes in transactions (`BEGIN ... COMMIT`) and using `IF NOT EXISTS` syntax where applicable.
+### 8.1 Dual Execution Contract: Flyway vs. Standalone Rerunnability
+The migration suite adheres to two distinct but complementary operational contracts:
+1. **Flyway Managed CI/CD Deployments (Exact-Once Contract)**:
+   - In production and deployment pipelines, Flyway manages migration versioning (`V001__...`, `V002__...`), executing each script strictly once per database instance.
+   - Execution status, applied timestamps, and SHA-256 checksums are immutably recorded in `flyway_schema_history`.
+2. **Standalone & Sandbox Rerunnability (Idempotent DDL Contract)**:
+   - For developer environments, test harness execution, retry runners, and partial-failure recovery, migration scripts must be safely rerunnable without error.
+   - All DDL statements utilize idempotent patterns:
+     * Columns: `ALTER TABLE ... ADD COLUMN IF NOT EXISTS ...`
+     * Constraints: `ALTER TABLE ... DROP CONSTRAINT IF EXISTS ... ADD CONSTRAINT ...`
+     * Functions: `CREATE OR REPLACE FUNCTION ...`
+     * Triggers: `DROP TRIGGER IF EXISTS ... CREATE TRIGGER ...`
+     * Policies: `DROP POLICY IF EXISTS ... CREATE POLICY ...`
+     * Roles: `DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_roles ...) THEN CREATE ROLE ...; END IF; END $$;`
 
 ### 8.2 Backup & Disaster Recovery
 - **Daily Physical Backups**: Managed via `pg_dump -Fc` or automated WAL archiving (pgBackRest / AWS RDS Automated Backups).

@@ -220,6 +220,33 @@ class TestKPIBankParser(unittest.TestCase):
             self.assertEqual(entry.ontology_payload["kpi_id"], entry.source_kpi_id)
             self.assertEqual(entry.ontology_payload["name"], entry.kpi_name)
 
+    def test_19_diff_detector_all_material_fields(self):
+        """Case 19: Diff detector detects changes across all materially relevant fields."""
+        prior = self.parse_result.accepted_entries[:1]
+        raw_base = json.loads(json.dumps(prior[0].ontology_payload))
+
+        fields_to_test = [
+            ("sector", "new_sector", "sector_changed"),
+            ("subdomain", "new_subdomain", "subdomain_changed"),
+            ("line_of_business", "new_lob", "line_of_business_changed"),
+            ("kpi_type", "custom", "kpi_type_changed"),
+            ("domain", "New Domain", "domain_changed"),
+            ("status", "deprecated", "status_changed"),
+            ("valid_dimensions", ["Dimension A", "Dimension B"], "dimensions_changed"),
+            ("aliases", ["New Alias"], "aliases_changed"),
+            ("formula", "X + Y", "formula_changed"),
+            ("definition", "New Definition", "definition_changed"),
+            ("enrichments", [{"team": "Risk", "source": {"sheet": "S1", "row": 1}}], "enrichments_changed")
+        ]
+
+        for field, new_val, change_flag in fields_to_test:
+            mod = dict(raw_base)
+            mod[field] = new_val
+            res = self.parser.parse_json_string(json.dumps([mod]))
+            diff = KPIVersionDiffDetector.compare_releases(prior, res.accepted_entries)
+            self.assertEqual(diff["updated_count"], 1, f"Failed to detect update on {field}")
+            self.assertTrue(diff["updated"][0]["changes"][change_flag], f"Change flag {change_flag} not set for {field}")
+
 
 if __name__ == "__main__":
     unittest.main()

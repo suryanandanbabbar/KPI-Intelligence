@@ -356,59 +356,87 @@ All platform-specific abstractions are projected into a unified polymorphous sch
 
 ## 5. Hardened Security, Multi-Tenant Isolation & Immutable Governance Architecture
 
-### 5.1 Multi-Tenant Isolation Architecture
-The platform enforces a defense-in-depth tenant isolation model across three synchronized layers:
+### 5.1 Multi-Tenant Isolation & Transaction-Local Authorization Model
+The platform enforces a defense-in-depth tenant isolation model across synchronized database and application layers:
 
 ```
-[ Trusted App Auth Gateway / JWT Context ]
+[ Trusted App Auth Gateway / JWT Session ]
                      │
                      ▼
   [ Transaction Session Resolution ]
-     SET LOCAL kpi_intel.current_tenant_id = '...'
+     set_current_tenant_id(UUID, p_is_local => true)
+     (Scopes strictly to current transaction block)
                      │
          ┌───────────┴───────────┐
          ▼                       ▼
 [ PostgreSQL Row Level Security ]  [ Composite Foreign Key Invariants ]
-  Enforces tenant scoping at       Enforces physical DB constraint rejection
-  query runtime for all DML.        if child tenant_id != parent tenant_id.
+  FORCE RLS on all 55 tenant      Physical multi-column constraints
+  scoped tables (direct + child).  prevent cross-tenant parent-child links.
 ```
 
-1. **Authoritative Session Context**:
-   - Tenant identity originates strictly from authenticated session claims, never from untrusted client parameters or file path strings.
-   - Database operations execute within a transaction setting `kpi_intel.current_tenant_id = '<tenant_uuid>'`, retrieved securely via `kpi_intel.current_tenant_id()`.
-   - If no tenant context is set, `current_tenant_id()` raises an exception, preventing unintended global access.
-2. **Row Level Security (RLS)**:
-   - Enabled across all operational metadata tables (`assets`, `asset_versions`, `analytical_objects`, `kpi_candidates`, `kpi_mapping_runs`, `kpi_mappings`, `domain_classifications`, `metadata_field_reviews`, `parser_runs`, `mapping_audit_events`).
-   - Root tables enforce direct `USING (tenant_id = kpi_intel.current_tenant_id())`.
-   - Child tables enforce parent-joining policies (e.g. `reports` joins to `analytical_objects.tenant_id`).
-   - Global reference tables (`business_domains`, `visual_types`, `platform_capabilities`, `kpi_ontology_versions`, `kpi_ontology_entries`) have authenticated read-only access (`FOR SELECT USING (true)`).
-3. **Composite Foreign Key Invariants**:
-   - Multi-column foreign keys `(asset_id, tenant_id)`, `(asset_version_id, tenant_id)`, etc. guarantee that cross-tenant record creation is rejected at the database engine constraint level, even for queries running under database administrator or superuser privileges where RLS might be bypassed.
+1. **Transaction-Local Session Scope & Lifecycle**:
+   - `kpi_intel.set_current_tenant_id(p_tenant_id UUID, p_is_local BOOLEAN DEFAULT true)` executes `set_config('kpi_intel.current_tenant_id', p_tenant_id::TEXT, p_is_local)`.
+   - When `p_is_local = true`, the configuration setting is strictly local to the active transaction. Upon `COMMIT` or `ROLLBACK`, PostgreSQL automatically purges the variable.
+   - Connection pools (e.g. PgBouncer, HikariCP) in transaction-pooling mode safely reuse connections without risking cross-tenant state leakage between sequential requests.
+   - For explicit cleanup, `kpi_intel.clear_current_tenant_id()` is provided.
+   - If no tenant context is set or context is malformed, `kpi_intel.current_tenant_id()` fails closed by raising an exception, preventing unintended global or cross-tenant data exposure.
+
+2. **Authorization Context vs Authentication Trust Boundary**:
+   - Setting a session configuration (`current_setting`) is an *authorization context mechanism*, not an authentication mechanism.
+   - The application backend serves as the authoritative trust boundary: it authenticates user identity (via JWT, OAuth2, or mTLS), extracts the verified `tenant_id`, and sets the context before executing queries.
+   - Untrusted clients must never be granted direct database access or privileges to invoke `set_current_tenant_id` with arbitrary tenant IDs.
+
+3. **Application Roles & Privilege Separation**:
+   - Dedicated application roles enforce the principle of least privilege:
+     * `kpi_app_user`: Standard runtime application role. Granted `USAGE` on schema `kpi_intel`, `SELECT, INSERT, UPDATE, DELETE` on operational tables, but `UPDATE`, `DELETE`, and `TRUNCATE` are explicitly **revoked** on audit ledgers (`mapping_audit_events`, `ontology_change_events`).
+     * `kpi_readonly`: Read-only reporting and audit role with `SELECT` permissions across all tables.
+
+4. **Complete 61-Table Row Level Security (RLS) Matrix**:
+   - `FORCE ROW LEVEL SECURITY` is enabled across all 55 tenant-scoped tables:
+     * Direct policies on tenant-keyed roots (`assets`, `asset_versions`, `analytical_objects`, `security_principals`, `domain_classifications`, `kpi_candidates`, `kpi_mapping_runs`, `kpi_mappings`, `metadata_field_reviews`, `parser_runs`, `mapping_audit_events`): `USING (tenant_id = kpi_intel.current_tenant_id())`.
+     * Parent-derived existential subquery policies on all 44 child tables (e.g. `reports`, `visuals`, `calculations`, `data_tables`, `pivot_tables`, `mapping_approvals`, `extraction_errors`).
+   - Authenticated read-only policies (`FOR SELECT USING (true)`) on 5 globally shared reference tables (`visual_types`, `business_domains`, `platform_capabilities`, `kpi_ontology_versions`, `kpi_ontology_entries`) and 1 system audit ledger (`ontology_change_events`).
+   - *Privileged Role Bypass Behavior*: In PostgreSQL, `SUPERUSER` and roles with `BYPASSRLS` bypass RLS by design. `FORCE ROW LEVEL SECURITY` ensures non-superuser table owners are strictly constrained. The application connection pool must always connect as `kpi_app_user` (a non-superuser role without `BYPASSRLS`).
+
+5. **Composite Foreign Key Boundaries & PostgreSQL 15+ Column-Specific Deletion**:
+   - Multi-column composite foreign keys enforce that parent and child records share the identical `tenant_id` and `asset_version_id`, preventing cross-tenant links even if RLS were bypassed.
+   - Where composite foreign keys pair nullable referencing columns with non-nullable referencing columns, PostgreSQL 15+ column-specific syntax is implemented:
+     * `kpi_mappings`: `FOREIGN KEY (selected_ontology_entry_id, ontology_version_id) REFERENCES kpi_ontology_entries(...) ON DELETE SET NULL (selected_ontology_entry_id)`
+     * `mapping_reviews`: `FOREIGN KEY (mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_mapping_candidates(...) ON DELETE SET NULL (mapping_candidate_id)`
+     * `mapping_approvals`: `FOREIGN KEY (approved_mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_mapping_candidates(...) ON DELETE SET NULL (approved_mapping_candidate_id)`
+     * `mapping_overrides`: `FOREIGN KEY (mapping_candidate_id, kpi_mapping_id) REFERENCES kpi_mapping_candidates(...) ON DELETE SET NULL (mapping_candidate_id)`
 
 ### 5.2 Immutable Governance & Audit Layer
 Audit integrity is protected against administrative tampering, cascade deletion, and state corruption:
 1. **Cascade Deletion Prohibition (`ON DELETE RESTRICT`)**:
    - `mapping_audit_events.kpi_mapping_id` references `kpi_mappings` with `ON DELETE RESTRICT`. Any attempt to delete an operational mapping that has associated audit history is rejected by PostgreSQL.
    - `ontology_change_events.ontology_version_id` references `kpi_ontology_versions` with `ON DELETE RESTRICT`.
-   - `target_kpi_mapping_id UUID NOT NULL` stores an immutable snapshot key on each audit event, ensuring traceability survives even if operational mappings are soft-deleted or archived.
-2. **Database Mutation Prevention Triggers**:
-   - `trg_mapping_audit_immutable` and `trg_ontology_audit_immutable` attach to `mapping_audit_events` and `ontology_change_events` respectively. Any `UPDATE` or `DELETE` statement triggers `kpi_intel.prevent_audit_mutation()`, immediately raising an uncatchable exception: `"Audit ledger records are strictly append-only and immutable"`.
-   - `trg_protect_human_approval` verifies that once an SME formally approves a mapping (`decision_source = 'HUMAN'` and `mapping_status = 'APPROVED'`), subsequent automated engine runs cannot overwrite or revert the mapping status without explicit human intervention.
+   - `target_kpi_mapping_id UUID NOT NULL` stores an immutable snapshot key on each audit event, ensuring traceability survives even if operational mappings are archived.
+2. **Database Mutation Prevention Triggers (`ERRCODE = '42501'`)**:
+   - `trg_mapping_audit_immutable` and `trg_ontology_audit_immutable` attach to `mapping_audit_events` and `ontology_change_events` respectively. Any `UPDATE` or `DELETE` triggers `kpi_intel.prevent_audit_mutation()`, raising standard PostgreSQL authorization exception `ERRCODE = '42501'` (`insufficient_privilege`): `"Audit ledger records are strictly append-only and immutable"`.
+3. **Hardened Human-Approval Protection State Machine**:
+   - `trg_protect_human_approval` enforces comprehensive transition rules on `kpi_mappings`:
+     * Automated runs (`LLM`, `DETERMINISTIC`) cannot alter an approved mapping.
+     * Core keys (`selected_ontology_entry_id`, `kpi_candidate_id`, `asset_version_id`, `ontology_version_id`, `created_at`) are immutable.
+     * `APPROVED` status cannot be reverted to `PROPOSED` or `UNMAPPED`.
+     * Lifecycle forward transitions (`SUPERSEDED`, `REVOKED`, `OVERRIDDEN`) strictly require a human actor (`NEW.decision_source = 'HUMAN'`).
+4. **Override Acyclic Hierarchy**:
    - `trg_prevent_override_cycle` intercepts `mapping_overrides` insertions and updates, traversing the `supersedes_override_id` chain to prevent cyclic or self-referencing override sequences.
 
 ### 5.3 KPI Bank Ingestion, Normalization & Diff Engine
-The local KPI Ontology Bank (~550+ insurance and enterprise metrics) is ingested via a dedicated, local-only parsing engine (`scripts/kpi_bank_parser.py`):
+The local KPI Ontology Bank (~550+ insurance and enterprise metrics) is ingested via `scripts/kpi_bank_parser.py`:
 1. **Local-Only Resource Rule**:
-   - The engine interacts strictly with local filesystem resources (`fixtures/kpi_bank_representative_fixture.json`). No external HTTP/REST network calls are made.
-2. **Lossless Raw Preservation**:
-   - 100% of the raw JSON object is preserved verbatim in `kpi_ontology_entries.ontology_payload` (JSONB), ensuring zero loss of vendor-specific tags, nested annotations, or custom properties.
+   - The engine interacts strictly with local filesystem resources. No external HTTP/REST network calls are made.
+2. **JSONB Semantic Preservation**:
+   - Preserves 100% semantic fidelity (types, numbers, booleans, nested keys, arrays, and Unicode) in `ontology_payload` (JSONB). PostgreSQL binary normalization formats whitespace and key order while retaining complete data integrity.
 3. **Structured Normalization**:
-   - Extracts and standardizes top-level source properties into dedicated relational columns: `source_kpi_id`, `source_sector`, `source_subdomain`, `source_line_of_business`, `source_status`, `valid_dimensions` (JSONB array), `enrichments` (JSONB object), `source_created_at`, and `source_created_by`.
+   - Extracts top-level source properties into dedicated relational columns: `source_kpi_id`, `source_sector`, `source_subdomain`, `source_line_of_business`, `source_status`, `valid_dimensions` (JSONB array), `enrichments` (JSONB object), `source_created_at`, and `source_created_by`.
 4. **Taxonomy Independence**:
-   - Source-native domain strings (e.g. `"Marketing"`, `"Customer Experience"`) are preserved in `business_domain` and `ontology_payload`. They are never forced or mangled into the 6 application business domains (`CLAIMS_RISK`, `LEGAL`, `UNDERWRITING`, `SALES_DISTRIBUTION`, `SERVICE_OPERATIONS`, `ACTUARIAL`).
-5. **Ontology Version Diffing Engine**:
-   - `KPIVersionDiffDetector` compares two ontology versions, identifying:
-     * `added_kpis`: New metric definitions.
-     * `removed_kpis`: Deprecated or deleted metrics.
-     * `modified_kpis`: Field-level differences (`formula`, `definition`, `dimensions`, `enrichments`).
-   - Every detected alteration generates an atomic audit entry in `ontology_change_events`.
+   - Source-native domain strings are preserved natively in `business_domain` and `ontology_payload` without forcing them into the 6 application business domains.
+5. **Ontology Version Diffing Across 11 Material Fields**:
+   - `KPIVersionDiffDetector` detects release deltas across all 11 material fields: `sector`, `subdomain`, `line_of_business`, `kpi_type`, `domain`, `status`, `valid_dimensions`, `aliases`, `formula`, `definition`, and `enrichments`. Every detected modification generates an audit record in `ontology_change_events`.
+
+### 5.4 Migration Execution Contract
+1. **Flyway Exact-Once Production Contract**: Migrations execute in strict sequence with transactional checksum validation.
+2. **Standalone Idempotent Development Contract**: All constraints, triggers, and RLS policies in `V002__canonical_model_hardening.sql` utilize idempotent `DROP ... IF EXISTS` patterns, ensuring safe rerunnability during development and testing.
+

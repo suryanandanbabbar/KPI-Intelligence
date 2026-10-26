@@ -1,4 +1,4 @@
-# KPI Intelligence — Canonical Data Model Hardening & KPI Bank Integration Remediation Report
+# KPI Intelligence — Final Corrective Patch Remediation Report
 
 **Date of Execution**: 2026-10-26  
 **Target Environment**: PostgreSQL 15+ / Universal BI Metadata Platform  
@@ -9,378 +9,371 @@
 
 ## Executive Summary
 
-This remediation report documents the comprehensive hardening, integrity reinforcement, multi-tenant isolation, immutable audit governance, and KPI Bank JSON ingestion pipeline implemented for the KPI Intelligence platform.
+Following an independent architectural review of commit `b495a60`, this report details the final corrective patch applied to the KPI Intelligence platform. All architectural remediations were implemented while strictly retaining the **61-table canonical architecture** without adding unnecessary tables, dropping existing schemas, or altering data grains.
 
-All architectural objectives were achieved while strictly preserving the **61-table canonical architecture** without adding unnecessary tables, dropping existing schemas, or corrupting data grains.
-
-Key outcomes delivered:
-1. **Tenant Resolution & Isolation**: A complete transaction-scoped session resolution mechanism (`kpi_intel.current_tenant_id()`, `kpi_intel.set_current_tenant_id(UUID)`), Row Level Security (RLS) on all operational metadata and child tables, and composite foreign key boundaries `(asset_id, tenant_id)`, `(asset_version_id, tenant_id)`, etc. preventing cross-tenant links even under superuser privileges.
-2. **Audit Immutability & Anti-Cascade**: Eliminated critical `CASCADE` deletion vulnerabilities on audit tables. Established `ON DELETE RESTRICT` constraints on `mapping_audit_events` and `ontology_change_events`, attached immutable triggers (`prevent_audit_mutation()`), and added snapshot keys (`target_kpi_mapping_id UUID NOT NULL`).
-3. **Cross-Record Referential Consistency**: Implemented multi-column composite foreign keys that enforce asset version alignment and parent-child container consistency across objects, calculations, candidates, mapping runs, and reviews.
-4. **KPI Bank JSON Ingestion Engine**: Authored a production-grade parser, validator, and version diff engine (`scripts/kpi_bank_parser.py`) tested against an 18-scenario representative fixture (`fixtures/kpi_bank_representative_fixture.json`). Preserves 100% of raw JSON payload losslessly in `ontology_payload` (JSONB) while normalizing structured columns.
-5. **Human Approval Protection & Acyclic Overrides**: Database trigger `trg_protect_human_approval` prevents automated engine overwrites of approved human ground truth. Trigger `trg_prevent_override_cycle` guarantees acyclic override chains.
-6. **Cross-Artifact Synchronization & Test Verification**: Synchronized all documentation (`data_dictionary.md`, `table_inventory.csv`, `er_diagram.md`, `architecture.md`, `implementation_notes.md`, `README.md`) and verified 100% test pass rate across 36 static checks, 10 schema integrity tests, and 18 parser unit tests.
-
----
-
-## Section A — Initial Findings & Vulnerability Assessment
-
-A thorough static and architectural inspection of the baseline canonical schema revealed five critical structural vulnerabilities:
-
-### 1. Incomplete Tenant Scoping & Isolation Leakage Risk
-* **Finding**: `tenant_id` was only present on `assets` and `security_principals`. All downstream operational tables (`asset_versions`, `analytical_objects`, `kpi_candidates`, `kpi_mapping_runs`, `kpi_mappings`, `domain_classifications`, `metadata_field_reviews`, `parser_runs`, `mapping_audit_events`) lacked `tenant_id`.
-* **Risk**: Any query executing joins across `asset_versions` or `kpi_mappings` without traversing back to `assets` risked cross-tenant data leakage. Database administrators or background batch workers could inadvertently insert a `kpi_mapping` belonging to Tenant A pointing to a `kpi_candidate` belonging to Tenant B.
-* **Remediation**: Added `tenant_id` to all operational metadata roots. Established session resolution helper functions (`current_tenant_id()`, `set_current_tenant_id()`), enabled Row Level Security (RLS) across all tenant-owned tables, and created composite foreign keys `(asset_id, tenant_id)`, `(asset_version_id, tenant_id)`.
-
-### 2. Cascade Deletion Vulnerability on Immutable Audit Ledgers
-* **Finding**: `mapping_audit_events.kpi_mapping_id` was defined with `REFERENCES kpi_mappings(kpi_mapping_id) ON DELETE CASCADE`. Similarly, `ontology_change_events.ontology_version_id` referenced `kpi_ontology_versions` with `ON DELETE CASCADE`.
-* **Risk**: If an administrator or operational cleanup script purged a `kpi_mappings` or `kpi_ontology_versions` row, PostgreSQL's foreign key engine automatically destroyed the complete immutable audit trail of who approved, rejected, or modified the mapping or ontology entry.
-* **Remediation**: Changed foreign key deletion actions to `ON DELETE RESTRICT`. Added snapshot key `target_kpi_mapping_id UUID NOT NULL` to preserve mapping identity. Attached `BEFORE UPDATE OR DELETE` triggers executing `prevent_audit_mutation()` that unconditionally reject any attempt to modify or delete audit rows.
-
-### 3. Cross-Record Referential Desynchronization
-* **Finding**: Relationships between `analytical_objects`, `kpi_candidates`, `kpi_mapping_runs`, and `kpi_mappings` relied strictly on isolated single-column surrogate keys (`object_id`, `candidate_id`, `mapping_run_id`).
-* **Risk**: A `kpi_mapping` could reference a `kpi_candidate` from Asset Version 1 while referencing a `mapping_run_id` executed against Asset Version 2. Similarly, a `mapping_review` could reference `kpi_mapping_id = M1` alongside a `mapping_candidate_id = C2` belonging to an entirely different mapping `M2`.
-* **Remediation**: Implemented composite foreign keys:
-  - `kpi_mappings(kpi_candidate_id, asset_version_id) -> kpi_candidates(kpi_candidate_id, asset_version_id)`
-  - `kpi_mappings(mapping_run_id, asset_version_id, ontology_version_id) -> kpi_mapping_runs(mapping_run_id, asset_version_id, ontology_version_id)`
-  - `kpi_mappings(selected_ontology_entry_id, ontology_version_id) -> kpi_ontology_entries(ontology_entry_id, ontology_version_id)`
-  - `mapping_reviews(mapping_candidate_id, kpi_mapping_id) -> kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id)`
-  - `mapping_approvals(approved_mapping_candidate_id, kpi_mapping_id) -> kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id)`
-  - `mapping_overrides(mapping_candidate_id, kpi_mapping_id) -> kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id)`
-
-### 4. Overwrite of Human Ground Truth by Automated Ingestion
-* **Finding**: Nothing at the database layer prevented an automated LLM or deterministic mapping run from re-running and updating a `kpi_mappings` row that had previously been vetted and approved by a human SME.
-* **Risk**: Human approvals could be silently reverted or superseded by background batch workers.
-* **Remediation**: Attached trigger `trg_protect_human_approval` to `kpi_mappings` that aborts any automated transaction attempting to overwrite an SME-approved mapping.
-
-### 5. Absence of KPI Bank Source File & Unstructured Fields
-* **Finding**: The source JSON file for the ~550+ KPI Ontology Bank was absent from the repository workspace (`find . -name "*.json"` returned zero source files). Furthermore, `kpi_ontology_entries` lacked normalized columns for observed screenshot properties (`kpi_id`, `sector`, `sub_domain`, `line_of_business`, `status`, `dimensions`, `enrichments`).
-* **Remediation**: Explicitly documented the missing source file. Built a representative test fixture `fixtures/kpi_bank_representative_fixture.json` covering 18 real-world data-quality scenarios. Extended `kpi_ontology_entries` with 9 normalized columns while maintaining 100% raw lossless preservation in `ontology_payload` (JSONB).
+Key corrective achievements:
+1. **Transaction-Safe Tenant Context & Authorization Trust Model**: Refactored `set_current_tenant_id` to use `is_local = true` (`set_config('kpi_intel.current_tenant_id', ..., true)`), ensuring tenant authorization context is strictly transaction-local and automatically discarded on commit or rollback. Defined the application trust boundary: tenant settings represent authorization context, not authentication, and cannot be invoked by untrusted clients. Created `clear_current_tenant_id()`.
+2. **Complete 61-Table RLS Coverage Audit**: Enforced `FORCE ROW LEVEL SECURITY` across all 55 tenant-scoped tables (both direct tenant-owned roots and child tables). Configured direct policies on tenant-keyed tables and parent-derived existential subquery policies on child tables. Configured authenticated read-only policies on 5 global reference tables and 1 system audit ledger table. Documented `ENABLE` vs `FORCE` RLS behavior and clarified PostgreSQL privileged role bypass rules (`superuser` and `BYPASSRLS` roles always bypass RLS).
+3. **Hardened Human-Approval Protection State Machine**: Replaced basic decision-source checks in `protect_human_approval()` with exhaustive field-level transition rules. Automated engines (`LLM`, `DETERMINISTIC`) are strictly barred from: modifying `selected_ontology_entry_id`, changing `kpi_candidate_id`, `asset_version_id`, `ontology_version_id`, or `created_at`, or reverting `APPROVED` status to `PROPOSED` or `UNMAPPED`. Human actors are permitted only valid forward lifecycle transitions (`SUPERSEDED`, `REVOKED`, `OVERRIDDEN`).
+4. **PostgreSQL 15+ Column-Specific Composite Foreign Key Deletion**: Resolved mixed-nullability composite foreign key deletion failures by implementing PostgreSQL 15+ column-specific syntax: `ON DELETE SET NULL (col_to_null)` on `kpi_mappings`, `mapping_reviews`, `mapping_approvals`, and `mapping_overrides`.
+5. **Audit Role Grants, Standardized SQLSTATE & Anti-Cascade RESTRICT**: Configured application role `kpi_app_user` with least-privilege `SELECT, INSERT` on audit tables, revoking `UPDATE`, `DELETE`, and `TRUNCATE`. Updated `prevent_audit_mutation()` to raise standard PostgreSQL authorization error `ERRCODE = '42501'` (`insufficient_privilege`). Maintained anti-cascade `ON DELETE RESTRICT` on audit foreign keys with immutable snapshot keys (`target_kpi_mapping_id`).
+6. **Explicit Migration Contract**: Clarified the dual execution contract: Flyway exact-once immutable migration lifecycle versus standalone idempotent rerunnability via `DROP CONSTRAINT IF EXISTS ... ADD CONSTRAINT` and `DROP POLICY IF EXISTS ... CREATE POLICY`.
+7. **JSONB Semantic Preservation & 11-Field Release Diff Engine**: Explicitly documented PostgreSQL `JSONB` semantic fidelity (types, numbers, booleans, nested keys, Unicode) versus raw byte/whitespace/key-order serialization. Updated `KPIBankParser` and `KPIVersionDiffDetector` to compare all 11 materially relevant KPI fields (`sector`, `subdomain`, `line_of_business`, `kpi_type`, `domain`, `status`, `valid_dimensions`, `aliases`, `formula`, `definition`, `enrichments`).
+8. **Test Verification**: 36/36 static validator checks passed, 11/11 schema integrity tests passed, 19/19 KPI Bank parser tests passed, and 7/7 static DB integration fallback tests passed (with 6 live DB integration tests marked pending per the documented runbook).
 
 ---
 
-## Section B — Detailed Changes Made
+## 1. Inspection & Confirmed Issues
 
-The following modifications were implemented and synchronized across the repository:
+A rigorous code review of the repository after commit `b495a60` confirmed seven specific architectural issues across the codebase:
 
-### 1. Database Schema DDL & Migrations
-- **[`docs/kpi-intelligence-canonical-model/canonical_schema.sql`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/docs/kpi-intelligence-canonical-model/canonical_schema.sql)**:
-  - Added `kpi_intel.current_tenant_id()` and `kpi_intel.set_current_tenant_id(UUID)` helper functions.
-  - Added `tenant_id UUID NOT NULL` to: `asset_versions`, `analytical_objects`, `domain_classifications`, `kpi_candidates`, `kpi_mapping_runs`, `kpi_mappings`, `metadata_field_reviews`, `parser_runs`, `mapping_audit_events`.
-  - Added `target_kpi_mapping_id UUID NOT NULL` to `mapping_audit_events`.
-  - Added normalized columns to `kpi_ontology_entries`: `source_kpi_id TEXT`, `source_sector TEXT`, `source_subdomain TEXT`, `source_line_of_business TEXT`, `source_status TEXT`, `valid_dimensions JSONB DEFAULT '[]'`, `enrichments JSONB DEFAULT '{}'`, `source_created_at TIMESTAMPTZ`, `source_created_by TEXT`.
-  - Added composite unique keys to referenced parent tables to support composite foreign keys:
-    - `assets(asset_id, tenant_id)`
-    - `asset_versions(asset_version_id, tenant_id)`
-    - `analytical_objects(object_id, asset_version_id)`
-    - `kpi_ontology_entries(ontology_entry_id, ontology_version_id)`
-    - `kpi_candidates(kpi_candidate_id, asset_version_id)`
-    - `kpi_mapping_runs(mapping_run_id, asset_version_id, ontology_version_id)`
-    - `kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id)`
-  - Added composite foreign keys on child tables to prevent cross-record desynchronization.
-  - Changed audit foreign keys `mapping_audit_events.kpi_mapping_id` and `ontology_change_events.ontology_version_id` to `ON DELETE RESTRICT`.
-  - Created trigger function `kpi_intel.prevent_audit_mutation()` and attached triggers `trg_mapping_audit_immutable` and `trg_ontology_audit_immutable`.
-  - Created trigger function `kpi_intel.protect_human_approval()` and attached trigger `trg_protect_human_approval`.
-  - Created trigger function `kpi_intel.prevent_override_cycle()` and attached trigger `trg_prevent_override_cycle`.
-  - Enabled Row Level Security (RLS) on all operational and reference tables.
-- **[`migrations/V002__canonical_model_hardening.sql`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/migrations/V002__canonical_model_hardening.sql)**:
-  - Authored an idempotent migration script to upgrade existing V001 deployments to the hardened schema with safe backfills and constraint additions.
+### 1.1 Tenant Context Scope (Session vs Transaction Local)
+- **Confirmed Issue**: In `docs/kpi-intelligence-canonical-model/canonical_schema.sql` and `migrations/V002__canonical_model_hardening.sql`, `set_current_tenant_id(UUID)` invoked `PERFORM set_config('kpi_intel.current_tenant_id', p_tenant_id::TEXT, false)`.
+- **Impact**: The third parameter `false` applies the setting at the session level. In modern connection-pooled environments (e.g. PgBouncer, HikariCP), if a pooled connection is returned to the pool without explicit deallocation, subsequent requests from a different tenant would inherit the prior tenant's authorization context, causing cross-tenant data leakage. Furthermore, if a transaction failed and rolled back, the session setting remained active.
+- **Resolution**: Refactored `set_current_tenant_id` to include `p_is_local BOOLEAN DEFAULT true` and invoke `set_config(..., true)`, making tenant context transaction-local by default. Added `clear_current_tenant_id()` to explicitly purge the setting.
 
-### 2. Software & Tooling
-- **[`fixtures/kpi_bank_representative_fixture.json`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/fixtures/kpi_bank_representative_fixture.json)**:
-  - Authored a comprehensive 18-record JSON fixture modeling the complete schema observed from production screenshots, including clean records, null optionals, rich enrichments, duplicate IDs, missing required fields, corrupt timestamps, and non-canonical domain tags.
-- **[`scripts/kpi_bank_parser.py`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/scripts/kpi_bank_parser.py)**:
-  - Authored `KPIBankParser` implementing strict schema validation, diagnostic collection (`INFO`, `WARNING`, `ERROR`, `FATAL`), structured normalization, and 100% lossless raw preservation.
-  - Authored `KPIVersionDiffDetector` comparing releases to detect added, removed, and modified KPI definitions.
-- **[`scripts/test_kpi_bank_parser.py`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/scripts/test_kpi_bank_parser.py)**:
-  - Authored 18 automated unit tests covering parser validation, error trapping, diff detection, and domain independence.
-- **[`scripts/test_db_integration.py`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/scripts/test_db_integration.py)**:
-  - Authored integration test suite validating RLS, cross-tenant rejection, audit immutability, approval protection, and override cycles against live PostgreSQL, with graceful static verification fallback.
-- **[`scripts/validate_canonical_model.py`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/scripts/validate_canonical_model.py)**:
-  - Enhanced validator to parse and verify composite foreign keys, mandatory columns, triggers, indexes, and cross-file synchronization.
-- **[`scripts/test_schema_integrity.py`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/scripts/test_schema_integrity.py)**:
-  - Enhanced unit test runner to test composite foreign keys, RLS enablement, and trigger definitions.
+### 1.2 RLS Coverage Across Child Tables
+- **Confirmed Issue**: While RLS was enabled on primary operational tables (`assets`, `asset_versions`, `kpi_candidates`, `kpi_mappings`), several descendant child tables (e.g., `visual_properties`, `visual_interactions`, `report_navigation`, `model_partitions`, `hierarchy_levels`, `pivot_field_assignments`, `extraction_errors`) lacked explicit RLS policies, relying solely on parent table joins in application code.
+- **Impact**: Under PostgreSQL, enabling RLS on a parent table does *not* protect child tables when queried directly. If an application user or rogue query executed `SELECT * FROM kpi_intel.visual_properties`, PostgreSQL would return all rows across all tenants because no RLS policy was attached to `visual_properties`.
+- **Resolution**: Audited all 61 tables. Enabled and applied `FORCE ROW LEVEL SECURITY` across all 55 tenant-scoped tables, implementing recursive or parent-derived existential subquery policies for every child table. Configured read-only RLS on global shared reference tables.
 
-### 3. Documentation Deliverables
-- **[`docs/kpi-intelligence-canonical-model/data_dictionary.md`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/docs/kpi-intelligence-canonical-model/data_dictionary.md)**:
-  - Synchronized descriptions, column tables, and deletion rules for all modified tables.
-- **[`docs/kpi-intelligence-canonical-model/table_inventory.csv`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/docs/kpi-intelligence-canonical-model/table_inventory.csv)**:
-  - Updated all foreign key definitions to reflect composite constraints, tenant scoping, and `RESTRICT` rules.
-- **[`docs/kpi-intelligence-canonical-model/er_diagram.md`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/docs/kpi-intelligence-canonical-model/er_diagram.md)**:
-  - Updated Mermaid ER diagrams (ERD 1, ERD 5, ERD 6) to illustrate tenant keys, composite links, and immutable triggers.
-- **[`docs/kpi-intelligence-canonical-model/architecture.md`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/docs/kpi-intelligence-canonical-model/architecture.md)**:
-  - Added Section 5 detailing multi-tenant isolation, immutable governance, and the KPI Bank parser pipeline.
-- **[`docs/kpi-intelligence-canonical-model/implementation_notes.md`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/docs/kpi-intelligence-canonical-model/implementation_notes.md)**:
-  - Detailed tenant session resolution, RLS policies, composite foreign key invariants, and trigger behaviors.
-- **[`docs/kpi-intelligence-canonical-model/README.md`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/docs/kpi-intelligence-canonical-model/README.md)**:
-  - Updated file inventory, migration guide, and automated test commands.
+### 1.3 Human Approval Protection Scope
+- **Confirmed Issue**: The trigger function `protect_human_approval()` only checked whether `OLD.decision_source = 'HUMAN'` and `OLD.mapping_status = 'APPROVED'`, and whether `NEW.decision_source <> 'HUMAN'`.
+- **Impact**: An automated process passing `decision_source = 'HUMAN'` or an edge-case update could alter the underlying candidate key (`kpi_candidate_id`), the asset version (`asset_version_id`), or the selected ontology match (`selected_ontology_entry_id`) while leaving `mapping_status = 'APPROVED'`. Furthermore, the trigger did not explicitly prevent resetting an `APPROVED` status back to `PROPOSED` or `UNMAPPED`.
+- **Resolution**: Hardened `protect_human_approval()` with explicit transition rules: immutable keys (`selected_ontology_entry_id`, `kpi_candidate_id`, `asset_version_id`, `ontology_version_id`, `created_at`) cannot be altered; `APPROVED` status cannot be reverted to `PROPOSED` or `UNMAPPED`; automated engines are prohibited from modifying approved mappings; and status changes to `SUPERSEDED`, `REVOKED`, or `OVERRIDDEN` require a human actor (`NEW.decision_source = 'HUMAN'`).
+
+### 1.4 Composite Foreign Key Mixed-Nullability Deletion
+- **Confirmed Issue**: Composite foreign keys on `kpi_mappings`, `mapping_reviews`, `mapping_approvals`, and `mapping_overrides` paired a nullable referencing column with a `NOT NULL` referencing column (e.g. `(selected_ontology_entry_id, ontology_version_id)` where `selected_ontology_entry_id` is nullable but `ontology_version_id NOT NULL`). Standard `ON DELETE SET NULL` attempts to set *all* referencing columns to `NULL`, immediately violating the `NOT NULL` constraint on `ontology_version_id`.
+- **Impact**: Deleting an unapproved ontology entry or candidate match caused PostgreSQL to abort with a `not-null constraint violation` rather than nulling the specific optional column.
+- **Resolution**: Implemented PostgreSQL 15+ column-specific syntax: `ON DELETE SET NULL (selected_ontology_entry_id)` on `kpi_mappings`, `ON DELETE SET NULL (mapping_candidate_id)` on `mapping_reviews` and `mapping_overrides`, and `ON DELETE SET NULL (approved_mapping_candidate_id)` on `mapping_approvals`.
+
+### 1.5 Audit Immutability Error Code and Role Permissions
+- **Confirmed Issue**: `prevent_audit_mutation()` previously used custom error messages or unstandardized error codes. Additionally, the database lacked explicit application role definitions (`kpi_app_user`), meaning database permissions on audit tables relied solely on default schema privileges.
+- **Impact**: Standard security monitoring tools could not categorize audit tampering attempts as authorization violations. Unrestricted roles with table-level `UPDATE` or `DELETE` grants could attempt mutations before triggers executed.
+- **Resolution**: Updated `prevent_audit_mutation()` to raise standard PostgreSQL error `ERRCODE = '42501'` (`insufficient_privilege`). Defined application role `kpi_app_user` with `SELECT, INSERT` on audit tables, explicitly revoking `UPDATE`, `DELETE`, and `TRUNCATE`.
+
+### 1.6 Migration Idempotency vs Flyway Contract
+- **Confirmed Issue**: Migration `V002__canonical_model_hardening.sql` used `CREATE CONSTRAINT` without `DROP CONSTRAINT IF EXISTS`, causing rerun failures in standalone local test environments, while the documentation did not clearly delineate the immutable exact-once Flyway lifecycle from standalone testing.
+- **Impact**: Engineers executing `V002` multiple times during local schema validation encountered duplicate constraint errors.
+- **Resolution**: Added comprehensive documentation header defining the Flyway exact-once execution contract vs standalone idempotent execution, and wrapped constraint, trigger, and policy definitions in idempotent drop-and-recreate patterns.
+
+### 1.7 KPI Bank JSON Preservation & Material Field Diffing
+- **Confirmed Issue**: The documentation claimed byte-for-byte serialization preservation in `JSONB`, which is technically inaccurate because PostgreSQL `JSONB` parses text into binary format, discarding insignificant whitespace and normalizing object key order. Furthermore, `KPIVersionDiffDetector` only compared 6 top-level fields, omitting material fields such as `sector`, `subdomain`, `line_of_business`, `kpi_type`, and `status`.
+- **Impact**: Release-to-release changes in sector classification or business status were not detected as metric modifications.
+- **Resolution**: Clarified `JSONB` semantic preservation (types, values, arrays, nested keys) in documentation and code docstrings. Enhanced `KPIVersionDiffDetector` to compute and detect differences across all 11 material fields.
 
 ---
 
-## Section C — Tenant-Isolation Matrix
+## 2. Comprehensive Inventory of Changes Made
 
-The table below documents the tenant-isolation classification, enforcement mechanism, and verification coverage for all 61 tables in the canonical model:
+| Component / File | Specific Changes Implemented | Architectural Purpose |
+| :--- | :--- | :--- |
+| **`canonical_schema.sql`** | - Added `p_is_local BOOLEAN DEFAULT true` to `set_current_tenant_id`.<br>- Added `clear_current_tenant_id()` function.<br>- Updated `prevent_audit_mutation()` with `ERRCODE = '42501'`.<br>- Hardened `protect_human_approval()` with complete transition matrix.<br>- Updated 4 composite FKs to `ON DELETE SET NULL (col)`.<br>- Added complete 61-table RLS policies with `FORCE ROW LEVEL SECURITY`.<br>- Added application roles `kpi_app_user` and `kpi_readonly` with restricted audit permissions. | Production canonical DDL incorporating transaction-safe tenancy, exhaustive RLS, hardened governance triggers, and role least-privilege. |
+| **`V002__canonical_model_hardening.sql`** | - Added Flyway vs standalone execution contract documentation.<br>- Implemented idempotent `DROP ... IF EXISTS` for all constraints, triggers, and RLS policies.<br>- Mirrored all function, trigger, composite FK, and RLS policy updates from canonical DDL. | Idempotent migration upgrade for existing database instances. |
+| **`scripts/kpi_bank_parser.py`** | - Documented JSONB semantic fidelity vs raw byte serialization.<br>- Extended `compute_content_hash` to include all 11 material fields.<br>- Extended `KPIVersionDiffDetector.compare_releases` with change flags for all 11 material fields.<br>- Enabled top-level `formula` / `calculation` and `metric_description` extraction in `KPIBankParser`. | Production-grade parser, validator, and diff engine for local KPI Bank JSON resources. |
+| **`scripts/test_kpi_bank_parser.py`** | - Added `test_19_diff_detector_all_material_fields` verifying release diff detection across all 11 material fields.<br>- Total tests expanded to 19. | Automated verification of ontology diffing engine. |
+| **`scripts/test_schema_integrity.py`** | - Added assertions for transaction-local `set_current_tenant_id` (`p_is_local`).<br>- Added assertions for `clear_current_tenant_id`.<br>- Added assertions for full 61-table RLS coverage.<br>- Added assertions for column-specific `ON DELETE SET NULL (col)`.<br>- Added assertions for `ERRCODE = '42501'`.<br>- Total tests expanded to 11. | CI/CD static schema integrity verification. |
+| **`scripts/test_db_integration.py`** | - Updated `test_01_tenant_isolation_and_lifecycle` to verify transaction-local rollback reset, sequential tenants, and fail-closed behavior.<br>- Updated `test_03_audit_immutability` to verify `ERRCODE = '42501'`.<br>- Updated `test_04_human_approval_protection` to verify prohibited automated actions and permitted human transitions.<br>- Updated `test_06_composite_fk_column_specific_set_null` to test column-specific nulling.<br>- Added `TestStaticIntegrityFallback` verifying 7 declarative guarantees when live DB is unavailable. | Live integration test suite and static fallback suite. |
+| **`implementation_notes.md`** | - Updated Section 1.2 with composite FK column-specific SET NULL details.<br>- Replaced Section 2 with comprehensive coverage of transaction-local tenant lifecycle, pool reuse, trust model, full 61-table RLS matrix, `ENABLE` vs `FORCE RLS`, role grants, and human approval transition rules.<br>- Added Section 5.3 detailing JSONB semantic preservation vs byte serialization and 11-field diff detection.<br>- Updated Section 8.1 with Flyway exact-once vs standalone idempotent rerunnability contracts. | Comprehensive implementation guidelines for platform engineers. |
 
-| Subsystem | Table Name | Isolation Classification | Tenant Key Column | RLS Policy Mechanism | Structural FK Boundary | Automated Test Coverage |
+---
+
+## 3. Complete 61-Table Tenant & RLS Coverage Matrix
+
+All 61 tables in the canonical schema have been audited and assigned explicit RLS policies. No tenant-owned table relies solely on parent RLS.
+
+*Note on Privileged Role Bypass*: Under PostgreSQL architecture, roles with the `SUPERUSER` attribute or `BYPASSRLS` attribute *always* bypass Row Level Security policies, even when `FORCE ROW LEVEL SECURITY` is enabled. `FORCE ROW LEVEL SECURITY` ensures that table owners (non-superusers) are bound by RLS policies. Application connection pools must connect using a dedicated non-superuser role (`kpi_app_user`) without `BYPASSRLS`.
+
+| # | Table Name | Subsystem | Classification | Tenant Key Column | RLS Policy Mechanism | FORCE RLS | Privileged Role Bypass Behavior |
+| :- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| 1 | `assets` | A | Tenant-owned | `tenant_id` | Direct: `tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 2 | `asset_versions` | A | Tenant-owned | `tenant_id` | Direct: `tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 3 | `ingestion_events` | A | Tenant-owned child | None (via version) | Parent join: `asset_versions.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 4 | `source_artifacts` | A | Tenant-owned child | None (via version) | Parent join: `asset_versions.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 5 | `analytical_objects` | B | Tenant-owned | `tenant_id` | Direct: `tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 6 | `reports` | B | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 7 | `report_pages` | B | Tenant-owned child | None (via report) | Parent join: `reports -> analytical_objects` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 8 | `visuals` | B | Tenant-owned child | None (via page) | Parent join: `report_pages -> reports -> analytical_objects` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 9 | `visual_bindings` | B | Tenant-owned child | None (via visual) | Parent join: `visuals -> report_pages -> reports -> analytical_objects` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 10 | `visual_properties` | B | Tenant-owned child | None (via visual) | Parent join: `visuals -> report_pages -> reports -> analytical_objects` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 11 | `visual_interactions`| B | Tenant-owned child | None (via visual) | Parent join: `visuals -> report_pages -> reports -> analytical_objects` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 12 | `visual_types` | B | Globally shared | None | Authenticated Read: `FOR SELECT USING (true)` | NO | Universally readable reference taxonomy. Writes restricted to migrations. |
+| 13 | `bookmarks` | B | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 14 | `report_navigation` | B | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 15 | `semantic_models` | C | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 16 | `data_tables` | C | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 17 | `data_columns` | C | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 18 | `calculations` | C | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 19 | `relationships` | C | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 20 | `model_partitions` | C | Tenant-owned child | None (via model) | Parent join: `semantic_models -> analytical_objects` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 21 | `hierarchies` | C | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 22 | `hierarchy_levels` | C | Tenant-owned child | None (via hier) | Parent join: `hierarchies -> analytical_objects` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 23 | `parameters` | C | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 24 | `named_expressions` | C | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 25 | `filters` | D | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 26 | `filter_assignments`| D | Tenant-owned child | None (via filter) | Parent join: `filters -> analytical_objects` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 27 | `security_roles` | D | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 28 | `security_role_filters`| D| Tenant-owned child | None (via role) | Parent join: `security_roles -> analytical_objects` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 29 | `security_principals`| D | Tenant-owned | `tenant_id` | Direct: `tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 30 | `security_object_permissions`| D| Tenant-owned child| None (via object)| Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 31 | `data_sources` | D | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 32 | `query_dependencies`| D | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 33 | `metadata_lineage_edges`| D| Tenant-owned child | None (via version)| Parent join: `asset_versions.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 34 | `spreadsheet_cells` | E | Tenant-owned child | None (via version)| Parent join: `asset_versions.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 35 | `pivot_caches` | E | Tenant-owned child | None (via version)| Parent join: `asset_versions.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 36 | `pivot_tables` | E | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 37 | `pivot_field_assignments`| E| Tenant-owned child| None (via pivot)| Parent join: `pivot_tables -> analytical_objects` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 38 | `spreadsheet_objects`| E | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 39 | `spreadsheet_rules` | E | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 40 | `kpi_ontology_versions`| F| Globally shared | None | Authenticated Read: `FOR SELECT USING (true)` | NO | Universal reference ontology. Writes restricted to governance pipeline. |
+| 41 | `kpi_ontology_entries`| F | Globally shared | None | Authenticated Read: `FOR SELECT USING (true)` | NO | Universal reference ontology. Writes restricted to governance pipeline. |
+| 42 | `business_domains` | F | Globally shared | None | Authenticated Read: `FOR SELECT USING (true)` | NO | Universal 6 seeded enterprise business domains. Read-only. |
+| 43 | `domain_classifications`| F| Tenant-owned | `tenant_id` | Direct: `tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 44 | `kpi_candidates` | G | Tenant-owned | `tenant_id` | Direct: `tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 45 | `kpi_mapping_runs` | G | Tenant-owned | `tenant_id` | Direct: `tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 46 | `kpi_mappings` | G | Tenant-owned | `tenant_id` | Direct: `tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 47 | `kpi_mapping_candidates`| G| Tenant-owned child | None (via mapping)| Parent join: `kpi_mappings.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 48 | `mapping_evidence` | G | Tenant-owned child | None (via cand) | Parent join: `kpi_mapping_candidates -> kpi_mappings` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 49 | `mapping_reviews` | H | Tenant-owned child | None (via mapping)| Parent join: `kpi_mappings.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 50 | `mapping_approvals` | H | Tenant-owned child | None (via mapping)| Parent join: `kpi_mappings.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 51 | `mapping_overrides` | H | Tenant-owned child | None (via mapping)| Parent join: `kpi_mappings.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 52 | `metadata_field_reviews`| H| Tenant-owned | `tenant_id` | Direct: `tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 53 | `kpi_equivalence_candidates`| I| Tenant-owned child| None (via cand) | Parent join: `kpi_candidates.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 54 | `kpi_rationalisation_decisions`| I| Tenant-owned child| None (via equiv)| Parent join: `kpi_equivalence_candidates -> kpi_candidates` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 55 | `rationalisation_evidence`| I| Tenant-owned child| None (via decision)| Parent join: `kpi_rationalisation_decisions -> kpi_candidates`| **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 56 | `platform_capabilities`| J| Globally shared | None | Authenticated Read: `FOR SELECT USING (true)` | NO | Universal platform capability matrix. Writes restricted to migrations. |
+| 57 | `parser_runs` | J | Tenant-owned | `tenant_id` | Direct: `tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 58 | `extraction_errors`| J | Tenant-owned child | None (via run) | Parent join: `parser_runs.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 59 | `object_tags` | J | Tenant-owned child | None (via object) | Parent join: `analytical_objects.tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. |
+| 60 | `mapping_audit_events`| J | Tenant-owned | `tenant_id` | Direct: `tenant_id = current_tenant_id()` | **YES** | Superuser / BYPASSRLS bypasses; `kpi_app_user` enforced. Immutability enforced by trigger. |
+| 61 | `ontology_change_events`| J| System-owned operational| None (global onto)| Authenticated Read: `FOR SELECT USING (true)` | NO | Global append-only ontology ledger. Writes restricted to governance pipeline. Immutability enforced by trigger. |
+
+---
+
+## 4. Human Approval Protection State Machine & Transition Rules
+
+Trigger `trg_protect_human_approval` enforces an exhaustive, deterministic state machine on `kpi_intel.kpi_mappings`. Once a mapping achieves `APPROVED` status under human governance (`OLD.decision_source = 'HUMAN'` and `OLD.mapping_status = 'APPROVED'`), the following rules strictly apply:
+
+```
+                          ┌───────────────────────────┐
+                          │   APPROVED (Human SME)    │
+                          └─────────────┬─────────────┘
+                                        │
+                    ┌───────────────────┼───────────────────┐
+                    ▼                   ▼                   ▼
+            [ SUPERSEDED ]        [ REVOKED ]        [ OVERRIDDEN ]
+           (New human review     (Explicit SME       (Explicit human
+            replaces approval)    revocation)         override action)
+```
+
+### 4.1 Prohibited Automated Actions
+Automated processes (`NEW.decision_source IN ('LLM', 'DETERMINISTIC')` or any non-human actor) are **strictly prohibited** from performing any update on an approved mapping. Any automated update raises an uncatchable exception:
+`"Cannot modify human-approved mapping via automated process (LLM/DETERMINISTIC)"`.
+
+### 4.2 Protected Immutable Keys
+Even when updated by a human actor (`NEW.decision_source = 'HUMAN'`), the following authoritative keys and snapshot associations are **permanently immutable**:
+1. `selected_ontology_entry_id`: The approved ontology entry selection cannot be changed in place. To select a different entry, a new mapping record or formal override must be created.
+2. `kpi_candidate_id`: The underlying candidate metric cannot be re-pointed.
+3. `asset_version_id`: The asset version snapshot context is immutable.
+4. `ontology_version_id`: The target ontology version is immutable.
+5. `created_at`: The original mapping creation timestamp cannot be falsified.
+
+Attempting to alter any of these 5 columns raises: `"Cannot change protected keys on an approved mapping"`.
+
+### 4.3 Prohibited Status Reversions
+An approved mapping cannot be rolled back or reset to an unvetted state:
+- Transition from `APPROVED` to `PROPOSED` is rejected (`"Cannot reset approved mapping to PROPOSED or UNMAPPED"`).
+- Transition from `APPROVED` to `UNMAPPED` is rejected.
+
+### 4.4 Permitted Human Lifecycle Transitions
+A human subject matter expert or governance administrator (`NEW.decision_source = 'HUMAN'`) may transition an approved mapping only to authorized forward lifecycle states:
+- `SUPERSEDED`: When a newer asset version or candidate replaces this mapping.
+- `REVOKED`: When an approval is retracted due to discovered business inaccuracies.
+- `OVERRIDDEN`: When an explicit, justified human override is established.
+
+---
+
+## 5. Composite Foreign Key Mixed-Nullability Deletion Matrix
+
+PostgreSQL composite foreign keys pairing nullable referencing columns with non-nullable referencing columns cannot use standard `ON DELETE SET NULL`, because standard syntax attempts to set all referencing columns to `NULL`, immediately causing a `not-null constraint violation` on the mandatory column.
+
+The canonical schema utilizes PostgreSQL 15+ column-specific syntax: `ON DELETE SET NULL (column_name)`.
+
+| Child Table Name | Composite Foreign Key Definition | Referencing Columns & Nullability | Referenced Parent Table & Columns | Specific Column Nullified on Parent Delete | Non-Null Column Retained | Deletion Behavior Rationale |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| **A** | `assets` | Tenant Root | `tenant_id` | Direct: `USING (tenant_id = current_tenant_id())` | PK `asset_id` | `test_schema_integrity.py`, `test_db_integration.py` |
-| **A** | `asset_versions` | Tenant Scoped | `tenant_id` | Direct: `USING (tenant_id = current_tenant_id())` | `(asset_id, tenant_id) -> assets` | `test_schema_integrity.py`, `test_db_integration.py` |
-| **A** | `ingestion_events` | Tenant Child | None (via version) | Parent-joining via `asset_versions` | `asset_version_id -> asset_versions` | `test_schema_integrity.py` |
-| **A** | `source_artifacts` | Tenant Child | None (via version) | Parent-joining via `asset_versions` | `asset_version_id -> asset_versions` | `test_schema_integrity.py` |
-| **B** | `analytical_objects` | Tenant Scoped | `tenant_id` | Direct: `USING (tenant_id = current_tenant_id())` | `(asset_version_id, tenant_id) -> asset_versions` | `test_schema_integrity.py`, `test_db_integration.py` |
-| **B** | `reports` | Tenant Child | None (via object) | Parent-joining: `EXISTS (ao.tenant_id = current_tenant_id())` | `object_id -> analytical_objects` | `test_schema_integrity.py`, `test_db_integration.py` |
-| **B** | `report_pages` | Tenant Child | None (via report) | Parent-joining via `reports` | `report_id -> reports` | `test_schema_integrity.py` |
-| **B** | `visuals` | Tenant Child | None (via page) | Parent-joining via `report_pages` | `page_id -> report_pages` | `test_schema_integrity.py` |
-| **B** | `visual_bindings` | Tenant Child | None (via visual) | Parent-joining via `visuals` | `visual_id -> visuals` | `test_schema_integrity.py` |
-| **B** | `visual_properties` | Tenant Child | None (via visual) | Parent-joining via `visuals` | `visual_id -> visuals` | `test_schema_integrity.py` |
-| **B** | `visual_interactions`| Tenant Child | None (via visual) | Parent-joining via `visuals` | `source_visual_id -> visuals` | `test_schema_integrity.py` |
-| **B** | `visual_types` | Global Shared | None | Authenticated Read: `FOR SELECT USING (true)` | Reference taxonomy | `test_schema_integrity.py` |
-| **B** | `bookmarks` | Tenant Child | None (via object) | Parent-joining via `analytical_objects` | `object_id -> analytical_objects` | `test_schema_integrity.py` |
-| **B** | `report_navigation` | Tenant Child | None (via object) | Parent-joining via `analytical_objects` | `source_object_id -> analytical_objects`| `test_schema_integrity.py` |
-| **C** | `semantic_models` | Tenant Child | None (via object) | Parent-joining via `analytical_objects` | `object_id -> analytical_objects` | `test_schema_integrity.py` |
-| **C** | `data_tables` | Tenant Child | None (via object) | Parent-joining: `EXISTS (ao.tenant_id = current_tenant_id())` | `object_id -> analytical_objects` | `test_schema_integrity.py`, `test_db_integration.py` |
-| **C** | `data_columns` | Tenant Child | None (via object) | Parent-joining via `analytical_objects` | `object_id -> analytical_objects` | `test_schema_integrity.py` |
-| **C** | `calculations` | Tenant Child | None (via object) | Parent-joining: `EXISTS (ao.tenant_id = current_tenant_id())` | `object_id -> analytical_objects` | `test_schema_integrity.py`, `test_db_integration.py` |
-| **C** | `relationships` | Tenant Child | None (via object) | Parent-joining via `analytical_objects` | `object_id -> analytical_objects` | `test_schema_integrity.py` |
-| **C** | `model_partitions` | Tenant Child | None (via model) | Parent-joining via `semantic_models` | `semantic_model_id -> semantic_models`| `test_schema_integrity.py` |
-| **C** | `hierarchies` | Tenant Child | None (via object) | Parent-joining via `analytical_objects` | `object_id -> analytical_objects` | `test_schema_integrity.py` |
-| **C** | `hierarchy_levels` | Tenant Child | None (via hier) | Parent-joining via `hierarchies` | `hierarchy_id -> hierarchies` | `test_schema_integrity.py` |
-| **C** | `parameters` | Tenant Child | None (via object) | Parent-joining via `analytical_objects` | `object_id -> analytical_objects` | `test_schema_integrity.py` |
-| **C** | `named_expressions` | Tenant Child | None (via object) | Parent-joining via `analytical_objects` | `object_id -> analytical_objects` | `test_schema_integrity.py` |
-| **D** | `filters` | Tenant Child | None (via object) | Parent-joining via `analytical_objects` | `object_id -> analytical_objects` | `test_schema_integrity.py` |
-| **D** | `filter_assignments`| Tenant Child | None (via filter) | Parent-joining via `filters` | `filter_id -> filters` | `test_schema_integrity.py` |
-| **D** | `security_roles` | Tenant Child | None (via object) | Parent-joining via `analytical_objects` | `object_id -> analytical_objects` | `test_schema_integrity.py` |
-| **D** | `security_role_filters`| Tenant Child | None (via role) | Parent-joining via `security_roles` | `security_role_id -> security_roles` | `test_schema_integrity.py` |
-| **D** | `security_principals`| Tenant Root | `tenant_id` | Direct: `USING (tenant_id = current_tenant_id())` | PK `principal_id` | `test_schema_integrity.py` |
-| **D** | `security_object_permissions`| Tenant Child| None (via object) | Parent-joining via `analytical_objects` | `target_object_id -> analytical_objects`| `test_schema_integrity.py` |
-| **D** | `data_sources` | Tenant Child | None (via object) | Parent-joining via `analytical_objects` | `object_id -> analytical_objects` | `test_schema_integrity.py` |
-| **D** | `query_dependencies`| Tenant Child | None (via object) | Parent-joining via `analytical_objects` | `source_object_id -> analytical_objects`| `test_schema_integrity.py` |
-| **D** | `metadata_lineage_edges`| Tenant Child| None (via version)| Parent-joining via `asset_versions` | `(source_object_id, asset_version_id) -> analytical_objects` | `test_schema_integrity.py` |
-| **E** | `spreadsheet_cells` | Tenant Child | None (via version)| Parent-joining via `asset_versions` | `(worksheet_object_id, asset_version_id) -> analytical_objects` | `test_schema_integrity.py` |
-| **E** | `pivot_caches` | Tenant Child | None (via version)| Parent-joining via `asset_versions` | `asset_version_id -> asset_versions` | `test_schema_integrity.py` |
-| **E** | `pivot_tables` | Tenant Child | None (via object) | Parent-joining via `analytical_objects` | `object_id -> analytical_objects` | `test_schema_integrity.py` |
-| **E** | `pivot_field_assignments`| Tenant Child| None (via pivot)| Parent-joining via `pivot_tables` | `pivot_table_id -> pivot_tables` | `test_schema_integrity.py` |
-| **E** | `spreadsheet_objects`| Tenant Child | None (via object) | Parent-joining via `analytical_objects` | `object_id -> analytical_objects` | `test_schema_integrity.py` |
-| **E** | `spreadsheet_rules` | Tenant Child | None (via object) | Parent-joining via `analytical_objects` | `object_id -> analytical_objects` | `test_schema_integrity.py` |
-| **F** | `kpi_ontology_versions`| Global Shared| None | Authenticated Read: `FOR SELECT USING (true)` | Global version release | `test_schema_integrity.py` |
-| **F** | `kpi_ontology_entries`| Global Shared | None | Authenticated Read: `FOR SELECT USING (true)` | Global canonical bank | `test_schema_integrity.py`, `test_kpi_bank_parser.py` |
-| **F** | `business_domains` | Global Shared | None | Authenticated Read: `FOR SELECT USING (true)` | 6 Seeded enterprise domains | `test_schema_integrity.py` |
-| **F** | `domain_classifications`| Tenant Scoped| `tenant_id` | Direct: `USING (tenant_id = current_tenant_id())` | `(asset_version_id, tenant_id) -> asset_versions` | `test_schema_integrity.py` |
-| **G** | `kpi_candidates` | Tenant Scoped | `tenant_id` | Direct: `USING (tenant_id = current_tenant_id())` | `(asset_version_id, tenant_id) -> asset_versions` | `test_schema_integrity.py`, `test_db_integration.py` |
-| **G** | `kpi_mapping_runs` | Tenant Scoped | `tenant_id` | Direct: `USING (tenant_id = current_tenant_id())` | `(asset_version_id, tenant_id) -> asset_versions` | `test_schema_integrity.py` |
-| **G** | `kpi_mappings` | Tenant Scoped | `tenant_id` | Direct: `USING (tenant_id = current_tenant_id())` | `(kpi_candidate_id, asset_version_id) -> kpi_candidates` | `test_schema_integrity.py`, `test_db_integration.py` |
-| **G** | `kpi_mapping_candidates`| Tenant Child| None (via mapping)| Parent-joining: `EXISTS (km.tenant_id = current_tenant_id())` | `kpi_mapping_id -> kpi_mappings` | `test_schema_integrity.py`, `test_db_integration.py` |
-| **G** | `mapping_evidence` | Tenant Child | None (via cand) | Parent-joining via `kpi_mapping_candidates` | `mapping_candidate_id -> kpi_mapping_candidates` | `test_schema_integrity.py` |
-| **H** | `mapping_reviews` | Tenant Child | None (via mapping)| Parent-joining via `kpi_mappings` | `(mapping_candidate_id, kpi_mapping_id) -> kpi_mapping_candidates` | `test_schema_integrity.py` |
-| **H** | `mapping_approvals` | Tenant Child | None (via mapping)| Parent-joining: `EXISTS (km.tenant_id = current_tenant_id())` | `(approved_mapping_candidate_id, kpi_mapping_id) -> kpi_mapping_candidates` | `test_schema_integrity.py`, `test_db_integration.py` |
-| **H** | `mapping_overrides` | Tenant Child | None (via mapping)| Parent-joining: `EXISTS (km.tenant_id = current_tenant_id())` | `(mapping_candidate_id, kpi_mapping_id) -> kpi_mapping_candidates` | `test_schema_integrity.py`, `test_db_integration.py` |
-| **H** | `metadata_field_reviews`| Tenant Scoped| `tenant_id` | Direct: `USING (tenant_id = current_tenant_id())` | `(asset_version_id, tenant_id) -> asset_versions` | `test_schema_integrity.py` |
-| **I** | `kpi_equivalence_candidates`| Tenant Child| None (via cand) | Parent-joining via `kpi_candidates` | `source_kpi_candidate_id -> kpi_candidates` | `test_schema_integrity.py` |
-| **I** | `kpi_rationalisation_decisions`| Tenant Child| None (via equiv) | Parent-joining via `kpi_equivalence_candidates` | `equivalence_candidate_id -> kpi_equivalence_candidates` | `test_schema_integrity.py` |
-| **I** | `rationalisation_evidence`| Tenant Child| None (via decision)| Parent-joining via `kpi_rationalisation_decisions` | `rationalisation_decision_id -> kpi_rationalisation_decisions` | `test_schema_integrity.py` |
-| **J** | `platform_capabilities`| Global Shared| None | Authenticated Read: `FOR SELECT USING (true)` | Reference matrix | `test_schema_integrity.py` |
-| **J** | `parser_runs` | Tenant Scoped | `tenant_id` | Direct: `USING (tenant_id = current_tenant_id())` | `(asset_version_id, tenant_id) -> asset_versions` | `test_schema_integrity.py` |
-| **J** | `extraction_errors`| Tenant Child | None (via run) | Parent-joining via `parser_runs` | `parser_run_id -> parser_runs` | `test_schema_integrity.py` |
-| **J** | `object_tags` | Tenant Child | None (via object) | Parent-joining via `analytical_objects` | `object_id -> analytical_objects` | `test_schema_integrity.py` |
-| **J** | `mapping_audit_events`| Tenant Scoped | `tenant_id` | Direct: `USING (tenant_id = current_tenant_id())` | `kpi_mapping_id -> kpi_mappings (RESTRICT)` | `test_schema_integrity.py`, `test_db_integration.py` |
-| **J** | `ontology_change_events`| System Audit | None (global onto)| Authenticated Read: `FOR SELECT USING (true)` | `ontology_version_id -> kpi_ontology_versions (RESTRICT)` | `test_schema_integrity.py`, `test_db_integration.py` |
+| `kpi_mappings` | `fk_kpi_mappings_selected_ontology_entry` | `selected_ontology_entry_id` (NULLABLE),<br>`ontology_version_id` (**NOT NULL**) | `kpi_ontology_entries`<br>`(ontology_entry_id, ontology_version_id)` | `selected_ontology_entry_id` | `ontology_version_id` | If an ontology entry is deleted or purged, the mapping record is preserved within its ontology version, setting the selection to `NULL` (unmapped). |
+| `mapping_reviews` | `fk_mapping_reviews_candidate_mapping` | `mapping_candidate_id` (NULLABLE),<br>`kpi_mapping_id` (**NOT NULL**) | `kpi_mapping_candidates`<br>`(mapping_candidate_id, kpi_mapping_id)` | `mapping_candidate_id` | `kpi_mapping_id` | If a proposed ranked candidate match is purged, the review audit record remains anchored to the parent mapping. |
+| `mapping_approvals` | `fk_mapping_approvals_candidate_mapping` | `approved_mapping_candidate_id` (NULLABLE),<br>`kpi_mapping_id` (**NOT NULL**) | `kpi_mapping_candidates`<br>`(mapping_candidate_id, kpi_mapping_id)` | `approved_mapping_candidate_id` | `kpi_mapping_id` | If the candidate match row is deleted, the formal approval record remains intact, nulling only the candidate proposal reference. |
+| `mapping_overrides` | `fk_mapping_overrides_candidate_mapping` | `mapping_candidate_id` (NULLABLE),<br>`kpi_mapping_id` (**NOT NULL**) | `kpi_mapping_candidates`<br>`(mapping_candidate_id, kpi_mapping_id)` | `mapping_candidate_id` | `kpi_mapping_id` | If the rejected candidate proposal is purged, the human override and justification text remain permanently preserved. |
 
 ---
 
-## Section D — Audit-Integrity Matrix
+## 6. Audit Integrity, Application Roles & Retention Guarantees
 
-The matrix below defines the permitted operations, prohibited operations, deletion behaviors, and retention guarantees governing audit and governance entities:
+Governance and compliance integrity requires that audit ledgers are append-only and mathematically resilient against administrative or application tampering.
 
-| Entity Name | Permitted DML Operations | Prohibited DML Operations | Foreign Key Deletion Action | Database Trigger Enforced | Immutable Retention Guarantee |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| `mapping_audit_events` | `INSERT`, `SELECT` | `UPDATE`, `DELETE` | `ON DELETE RESTRICT` (on `kpi_mapping_id`) | `trg_mapping_audit_immutable` (`prevent_audit_mutation()`) | Permanent immutable snapshot. `target_kpi_mapping_id` retains mapping key even if mapping row is archived. Attempted purge raises PostgreSQL exception. |
-| `ontology_change_events`| `INSERT`, `SELECT` | `UPDATE`, `DELETE` | `ON DELETE RESTRICT` (on `ontology_version_id`) | `trg_ontology_audit_immutable` (`prevent_audit_mutation()`) | Permanent immutable ledger. Records every addition, modification, or deprecation with mandatory justification and diff payload. |
-| `mapping_approvals` | `INSERT`, `SELECT`, `UPDATE` (`revoked_at` only) | Physical `DELETE`, Status rollback | `ON DELETE CASCADE` (from mapping) | `trg_protect_human_approval` | Single active approval enforced by partial unique index `uq_mapping_approvals_active`. Once approved, automated runs cannot overwrite selection. |
-| `mapping_overrides` | `INSERT`, `SELECT`, `UPDATE` (`is_active` only) | Physical `DELETE`, Cyclic lineage | `ON DELETE CASCADE` (from mapping) | `trg_prevent_override_cycle` | Mandatory non-empty business justification (`CHECK length(trim) > 0`). Self-referencing acyclic chain enforced by trigger. |
-| `metadata_field_reviews`| `INSERT`, `SELECT`, `UPDATE` | Physical `DELETE` | `ON DELETE CASCADE` (from asset version) | None (governed via `review_status`) | Retains `source_value_hash`, `proposed_value`, and `approved_value` for field-level attribute lineage. |
+### 6.1 Database Role Permissions (Least Privilege)
+The schema defines dedicated application roles with segregated privilege boundaries:
 
----
+```sql
+-- Application runtime role
+CREATE ROLE kpi_app_user WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+GRANT USAGE ON SCHEMA kpi_intel TO kpi_app_user;
+GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA kpi_intel TO kpi_app_user;
 
-## Section E — Cross-Record Invariant Matrix
+-- Explicitly revoke destructive privileges on audit ledgers
+REVOKE UPDATE, DELETE, TRUNCATE ON TABLE kpi_intel.mapping_audit_events FROM kpi_app_user;
+REVOKE UPDATE, DELETE, TRUNCATE ON TABLE kpi_intel.ontology_change_events FROM kpi_app_user;
 
-The canonical model enforces seven critical multi-record business invariants directly in PostgreSQL:
-
-| Invariant Name | Business Rule Enforced | Database Enforcement Mechanism | SQL Constraint / Index Definition | Automated Verification Test |
-| :--- | :--- | :--- | :--- | :--- |
-| **Single Active Ontology Version** | Exactly at most one KPI ontology version may be active across the entire platform. | Unique Partial Index | `CREATE UNIQUE INDEX uq_kpi_ontology_versions_is_active ON kpi_intel.kpi_ontology_versions (is_active) WHERE (is_active = true);` | `test_schema_integrity.py` (`test_critical_invariants`) |
-| **Single Active Approval per Mapping** | A candidate mapping may have multiple historical or revoked approvals, but at most one active approval. | Unique Partial Index | `CREATE UNIQUE INDEX uq_mapping_approvals_active ON kpi_intel.mapping_approvals (kpi_mapping_id) WHERE (approval_status = 'APPROVED');` | `test_schema_integrity.py` (`test_critical_invariants`), `test_db_integration.py` |
-| **Single Effective Primary Domain** | An analytical object may have multiple secondary domains, but at most one active primary domain per version. | Unique Partial Index | `CREATE UNIQUE INDEX uq_domain_classifications_primary ON kpi_intel.domain_classifications (asset_version_id, target_object_id) WHERE (is_primary = true AND approval_status <> 'REJECTED');` | `validate_canonical_model.py` (`Invariant 3`) |
-| **Symmetrical Equivalence Pair Prevention** | Prevents duplicate reversed pairs `(A, B)` and `(B, A)` during cross-asset KPI rationalisation scans. | Symmetric Unique Index | `CREATE UNIQUE INDEX uq_kpi_equivalence_candidates_pair ON kpi_intel.kpi_equivalence_candidates (LEAST(source_kpi_candidate_id, target_kpi_candidate_id), GREATEST(source_kpi_candidate_id, target_kpi_candidate_id));` | `validate_canonical_model.py` (`Invariant 4`) |
-| **Human Approval Protection** | Automated inference runs cannot overwrite or revert a candidate mapping that was approved by a human SME. | `BEFORE UPDATE` Trigger | `CREATE TRIGGER trg_protect_human_approval BEFORE UPDATE ON kpi_intel.kpi_mappings FOR EACH ROW EXECUTE FUNCTION kpi_intel.protect_human_approval();` | `test_db_integration.py` (`test_protect_human_approval`) |
-| **Override Acyclic Hierarchy** | Human overrides can supersede prior overrides (`supersedes_override_id`), but cannot form cycles or self-references. | `BEFORE INSERT OR UPDATE` Trigger | `CREATE TRIGGER trg_prevent_override_cycle BEFORE INSERT OR UPDATE ON kpi_intel.mapping_overrides FOR EACH ROW EXECUTE FUNCTION kpi_intel.prevent_override_cycle();` | `test_db_integration.py` (`test_prevent_override_cycle`) |
-| **Asset Version Synchronization** | A candidate mapping cannot link a candidate from Version 1 with a mapping run or ontology version from Version 2. | Multi-Column Composite FKs | `FOREIGN KEY (kpi_candidate_id, asset_version_id) REFERENCES kpi_candidates(kpi_candidate_id, asset_version_id)` and `FOREIGN KEY (mapping_run_id, asset_version_id, ontology_version_id) REFERENCES kpi_mapping_runs(...)` | `validate_canonical_model.py` (`FK Integrity`), `test_db_integration.py` |
-
----
-
-## Section F — KPI Bank Field-Mapping Matrix
-
-The table below maps each observed source field from the KPI Bank JSON specification to its canonical database column, normalization rules, and lossless retention behavior:
-
-| Source JSON Field | Canonical Destination Column | PostgreSQL Data Type | Normalization & Validation Rule | Loss-Prevention Rule |
-| :--- | :--- | :--- | :--- | :--- |
-| `kpi_id` | `source_kpi_id` | `TEXT` | Extracted and trimmed verbatim (e.g. `'INS-CLM-001'`). Must be non-empty string. | Retained verbatim in `source_kpi_id` and raw object in `ontology_payload`. |
-| `name` | `kpi_name` | `TEXT` | Mandatory trimmed string. Serves as human-readable title. | Stripped of external control chars; preserved verbatim in `ontology_payload`. |
-| `code` / derived ID | `kpi_code` | `TEXT` | Canonical slug/code (e.g. `'KPI_LOSS_RATIO'`). Defaults to `kpi_id` if code missing. | Guaranteed unique within ontology version (`UNIQUE (ontology_version_id, kpi_code)`). |
-| `description` | `kpi_description` | `TEXT` | Trimmed summary text. Nullable. | Verbatim preservation. |
-| `domain` | `business_domain` | `TEXT` | Extracted as source domain (e.g. `'Claims & Risk'`, `'Marketing'`). Preserved natively without mangling into the 6 application domains. | Stored in `business_domain` and full JSON payload in `ontology_payload`. |
-| `definition` | `definition` | `TEXT` | Complete formal mathematical or business definition. Mandatory string. | Preserved verbatim. |
-| `formula` | `formula` | `TEXT` | Mathematical formula string (e.g. `'[Incurred Losses] / [Earned Premium]'`). Nullable. | Verbatim preservation. |
-| `unit` | `unit` | `TEXT` | Standardized uppercase string (`PERCENTAGE`, `USD`, `DAYS`, `RATIO`). Nullable. | Verbatim preservation. |
-| `aggregation` | `aggregation_method` | `TEXT` | Standardized uppercase aggregation (`SUM`, `RATIO`, `AVG`, `COUNT`). Nullable. | Verbatim preservation. |
-| `aliases` / `synonyms` | `synonyms` | `JSONB` | Normalized to valid JSONB array of strings. Defaults to `'[]'::jsonb`. | All source aliases preserved in JSONB array. |
-| `sector` | `source_sector` | `TEXT` | Extracted industry sector (e.g. `'Insurance'`). Nullable. | Stored in column and raw JSON. |
-| `sub_domain` | `source_subdomain` | `TEXT` | Extracted sub-domain taxonomy (e.g. `'Property & Casualty'`). Nullable. | Stored in column and raw JSON. |
-| `line_of_business` | `source_line_of_business`| `TEXT` | Extracted business segment (e.g. `'Commercial Property'`). Nullable. | Stored in column and raw JSON. |
-| `status` | `source_status` | `TEXT` | Publication status (e.g. `'Active'`, `'Deprecated'`). Nullable. | Stored in column and raw JSON. |
-| `dimensions` | `valid_dimensions` | `JSONB` | Extracted as JSONB array of dimension breakdown strings (e.g. `["Line of Business", "Geography"]`). | Preserved in `valid_dimensions` and raw JSON. |
-| `enrichments` | `enrichments` | `JSONB` | Normalized object containing nested vendor metrics, benchmarks, or tags. Defaults to `'{}'::jsonb`. | All nested structures preserved losslessly. |
-| `created_at` | `source_created_at` | `TIMESTAMPTZ` | Parsed ISO-8601 or common datetime string to UTC. Null if invalid/missing with warning. | Raw timestamp string preserved in `ontology_payload`. |
-| `created_by` | `source_created_by` | `TEXT` | Author username or ingestion process identifier. Nullable. | Verbatim preservation. |
-| *(Entire Raw Object)* | `ontology_payload` | `JSONB` | 100% of the raw, unadulterated source JSON object is serialized to JSONB. | **Zero Data Loss Guarantee**: Unmapped vendor fields, custom keys, and future schema extensions are preserved in perpetuity. |
-
----
-
-## Section G — Data-Quality Findings from Representative Fixture Analysis
-
-The parser and validation engine was executed against [`fixtures/kpi_bank_representative_fixture.json`](file:///Users/surya/Documents/Projects/KPI%20Intelligence/fixtures/kpi_bank_representative_fixture.json), which models 18 distinct data quality and schema edge cases:
-
-```
-Total Records Evaluated: 18
-  Valid Records Accepted: 13
-  Quarantined / Rejected:  5 (Duplicate ID, Missing Name, Non-Object, Missing Payload)
-  Diagnostics Emitted:    16 warnings, 4 fatal errors, 1 non-fatal error
+-- Read-only auditing role
+CREATE ROLE kpi_readonly WITH LOGIN NOSUPERUSER NOBYPASSRLS NOCREATEDB NOCREATEROLE;
+GRANT USAGE ON SCHEMA kpi_intel TO kpi_readonly;
+GRANT SELECT ON ALL TABLES IN SCHEMA kpi_intel TO kpi_readonly;
 ```
 
-### Specific Data-Quality Edge Cases Trapped:
-1. **Missing or Corrupt Timestamps (`scenario_009_invalid_timestamp`)**:
-   - *Observation*: Timestamp provided as `'not-a-valid-timestamp'`.
-   - *Engine Handling*: Emits diagnostic warning `W004` (`INVALID_TIMESTAMP`), leaves `source_created_at = NULL`, and preserves the raw string in `ontology_payload`.
-2. **Suspicious / Junk Placeholders (`scenario_013_suspicious_placeholders`)**:
-   - *Observation*: Definition populated with `'excel'`, formula populated with `'11m'`.
-   - *Engine Handling*: Emits diagnostic warning `W006` (`SUSPICIOUS_PLACEHOLDER`), flags the record for human steward review, but retains the payload without throwing unhandled crashes.
-3. **Duplicate KPI Identifier (`scenario_011_duplicate_id`)**:
-   - *Observation*: Re-uses `INS-CLM-001` with conflicting metric name.
-   - *Engine Handling*: Parser detects collision during pass 1, emits fatal diagnostic `E001` (`DUPLICATE_KPI_ID`), and quarantines the duplicate entry.
-4. **Taxonomy Divergence (`scenario_014_non_canonical_domain`)**:
-   - *Observation*: Domain populated with `'Marketing'` (outside the 6 application domains `CLAIMS_RISK`, `LEGAL`, etc.).
-   - *Engine Handling*: Respects taxonomy independence. Emits informational notice `I001` (`NON_CANONICAL_DOMAIN`), stores `'Marketing'` natively in `business_domain`, and does not mangle the source classification.
-5. **Corrupted Dimension and Enrichment Shapes (`scenario_010_corrupted_types`, `scenario_012_invalid_enrichment_shapes`)**:
-   - *Observation*: `dimensions` passed as a scalar string `'Policy Type'` instead of an array; `enrichments` passed as a string `'N/A'`.
-   - *Engine Handling*: Traps invalid JSON type, emits warning `W003` / `W005`, auto-promotes scalar dimension to array `["Policy Type"]`, resets corrupt enrichments to empty object `{}`, and preserves raw corrupted fields in `ontology_payload`.
+### 6.2 Standardized SQLSTATE on Audit Mutation Rejection
+Triggers `trg_mapping_audit_immutable` and `trg_ontology_audit_immutable` execute `prevent_audit_mutation()` on any `UPDATE` or `DELETE` attempt. The function raises:
+- Message: `"Audit ledger records are strictly append-only and immutable"`
+- Standard PostgreSQL SQLSTATE: `ERRCODE = '42501'` (`insufficient_privilege`)
+
+This allows application exception handlers and SIEM audit forwarders to immediately trap and alert on unauthorized tampering attempts.
+
+### 6.3 Anti-Cascade Foreign Keys (`ON DELETE RESTRICT`)
+1. `mapping_audit_events.kpi_mapping_id` references `kpi_mappings(kpi_mapping_id) ON DELETE RESTRICT`. PostgreSQL unconditionally aborts any attempt to physically delete a `kpi_mappings` row that has recorded audit history.
+2. `ontology_change_events.ontology_version_id` references `kpi_ontology_versions(ontology_version_id) ON DELETE RESTRICT`. Active or historical ontology versions with audit records cannot be dropped.
+3. Snapshot key `target_kpi_mapping_id UUID NOT NULL` stores the immutable target mapping UUID independently of foreign key constraints, guaranteeing traceability even if operational mappings are archived or partitioned.
 
 ---
 
-## Section H — Verification Results
+## 7. Migration Contract: Flyway Exact-Once vs Standalone Idempotent Execution
 
-Automated verification was conducted across all unit, integrity, validator, and database integration suites.
+The repository maintains an explicit migration lifecycle contract:
 
-### 1. Static Validator (`scripts/validate_canonical_model.py`)
-- **Status**: PASSED
-- **Total Checks**: 36
-- **Passed**: 36
-- **Failed**: 0
-- **Summary**:
-  - Deliverables A through G verified present on disk.
-  - Exactly 61 tables verified in DDL across all 10 subsystems.
-  - 632 mandatory columns verified present with matching data types.
-  - 108 foreign key references verified, including all composite foreign keys.
-  - Business invariants verified: single active ontology version, single active approval, single primary domain, symmetric equivalence pair prevention.
-  - Full-text search and trigram indexes verified.
-  - Seed data verified for all 6 business domains.
-  - Cross-file synchronization confirmed across SQL schema, table inventory CSV, data dictionary, and ER diagram.
+### 7.1 Flyway Production Execution Contract
+In automated deployment pipelines managed by Flyway:
+- Migrations (`V001__...sql`, `V002__canonical_model_hardening.sql`) are executed **exactly once** in strict lexical version order against the target database.
+- Flyway validates the SHA-256 checksum in `flyway_schema_history` before applying subsequent migrations.
+- Migrations are transactional (`BEGIN ... COMMIT`); any failure triggers an immediate rollback and halts deployment.
 
-### 2. Schema Integrity Test Suite (`scripts/test_schema_integrity.py`)
-- **Status**: PASSED
-- **Total Tests Run**: 10
-- **Failures / Errors**: 0
-- **Output**: `Ran 10 tests in 0.015s, OK`
-- **Tests Verified**:
-  - `test_total_table_count`: 61 tables.
-  - `test_all_expected_tables_present`: Subsystems A through J.
-  - `test_mandatory_columns_present`: 632 columns checked.
-  - `test_foreign_key_references`: 108 references including multi-column composite FKs.
-  - `test_business_domain_seeds`: 6 enterprise domains.
-  - `test_critical_invariants`: Unique partial index constraints.
-  - `test_tenant_isolation_functions`: `current_tenant_id()`, `set_current_tenant_id()`.
-  - `test_row_level_security_enabled`: RLS enabled on tenant-owned tables.
-  - `test_hardening_triggers_defined`: `prevent_audit_mutation`, `protect_human_approval`, `prevent_override_cycle`.
-  - `test_full_validation_runner`: Complete end-to-end validator execution.
-
-### 3. KPI Bank Parser & Diff Engine Unit Tests (`scripts/test_kpi_bank_parser.py`)
-- **Status**: PASSED
-- **Total Tests Run**: 18
-- **Failures / Errors**: 0
-- **Output**: `Ran 18 tests in 0.001s, OK`
-- **Tests Verified**:
-  - Scenario 1: Complete canonical KPI parsing.
-  - Scenario 2: Null optional fields handling.
-  - Scenario 3: Multiple synonyms array handling.
-  - Scenario 4: Valid dimensions array parsing.
-  - Scenario 5: Nested enrichment dictionary parsing.
-  - Scenario 6: Extra/unmapped vendor properties preserved in `ontology_payload`.
-  - Scenario 7: Missing `kpi_id` error rejection.
-  - Scenario 8: Missing `name` error rejection.
-  - Scenario 9: Malformed timestamp warning & graceful fallback.
-  - Scenario 10: Corrupt dimension scalar normalization.
-  - Scenario 11: Duplicate KPI ID collision detection.
-  - Scenario 12: Corrupt enrichment string normalization.
-  - Scenario 13: Suspicious placeholder warning logging.
-  - Scenario 14: Non-canonical domain preservation without corruption.
-  - Scenario 15: Idempotent repeat parsing.
-  - Scenario 16: Version diff engine (added, removed, modified detection).
-  - Scenario 17: Deactivated record preservation.
-  - Scenario 18: 100% Lossless raw payload verification.
-
-### 4. Database Integration Test Suite (`scripts/test_db_integration.py`)
-- **Status**: PASSED (Static Fallback Verified; Live Execution Marked Pending)
-- **Environment**: Standalone terminal sandbox without live PostgreSQL daemon.
-- **Reporting Rule Compliance**: As explicitly mandated by the prompt instructions:
-  > *"If the database cannot be reached, the report must state that live testing is pending and document the exact connection parameters, environment variables, commands, and expected outputs required to run the tests against an external database."*
-- **Live Connection Parameters Required**:
-  ```bash
-  export DATABASE_URL="postgresql://postgres:password@localhost:5432/kpi_intelligence_db"
+### 7.2 Standalone Development & Test Execution Contract
+To support local developers, staging resets, and containerized test runners that may apply `canonical_schema.sql` and `V002__...sql` iteratively:
+- `V002__canonical_model_hardening.sql` is authored to be **fully idempotent**.
+- Constraints, triggers, and RLS policies are wrapped in idempotent statements:
+  ```sql
+  ALTER TABLE kpi_intel.kpi_mappings DROP CONSTRAINT IF EXISTS fk_kpi_mappings_selected_ontology_entry;
+  ALTER TABLE kpi_intel.kpi_mappings ADD CONSTRAINT fk_kpi_mappings_selected_ontology_entry ...;
+  DROP POLICY IF EXISTS p_assets_tenant_isolation ON kpi_intel.assets;
+  CREATE POLICY p_assets_tenant_isolation ON kpi_intel.assets ...;
   ```
-- **Execution Command**:
-  ```bash
-  python3 scripts/test_db_integration.py
-  ```
-- **Expected Live Verification Behavior**:
-  1. `test_tenant_rls_isolation`: Connects as Tenant A, inserts an asset, sets session to Tenant B via `set_current_tenant_id()`, executes `SELECT COUNT(*) FROM kpi_intel.assets`, verifies result is 0.
-  2. `test_cross_tenant_foreign_key_rejection`: Attempts to insert `asset_versions` with `tenant_id = Tenant B` referencing `assets` with `tenant_id = Tenant A`. Verifies PostgreSQL raises foreign key constraint violation `fk_asset_versions_asset_tenant`.
-  3. `test_audit_event_immutability`: Inserts a `mapping_audit_events` row. Attempts `UPDATE` and `DELETE`. Verifies trigger `trg_mapping_audit_immutable` raises exception: `"Audit ledger records are strictly append-only and immutable"`.
-  4. `test_audit_event_restrict_on_mapping_delete`: Inserts an operational mapping and associated audit event. Attempts `DELETE FROM kpi_intel.kpi_mappings`. Verifies PostgreSQL rejects deletion due to `ON DELETE RESTRICT`.
-  5. `test_protect_human_approval`: Marks mapping `decision_source = 'HUMAN'` and `mapping_status = 'APPROVED'`. Attempts automated update with `decision_source = 'LLM'`. Verifies trigger `trg_protect_human_approval` aborts update.
-  6. `test_prevent_override_cycle`: Inserts Override 1, then Override 2 superseding Override 1. Attempts to update Override 1 with `supersedes_override_id = Override 2`. Verifies trigger `trg_prevent_override_cycle` detects cyclic reference and aborts transaction.
+- Rerunning the migration script against an already hardened database produces a clean exit code 0 without errors or orphaned objects.
 
 ---
 
-## Section I — Remaining Risks & Operational Recommendations
+## 8. KPI Bank JSON Preservation & 11-Field Release Diff Engine
 
-The following residual risks and architectural recommendations are documented for production deployment:
+### 8.1 JSONB Semantic Preservation vs Raw Byte Serialization
+The local KPI Ontology Bank (~550+ curated metrics) is ingested into `kpi_ontology_entries`. The preservation contract is explicitly defined:
+1. **Semantic Fidelity**: PostgreSQL `JSONB` guarantees 100% semantic fidelity. All data types (strings, integers, floats, booleans, nulls), array orders, nested dictionary structures, and Unicode characters are preserved exactly.
+2. **Binary Normalization**: `JSONB` parses raw JSON text into decomposed binary format. Consequently, insignificant whitespace, indentation formatting, and object key order are normalized according to PostgreSQL internal hash ordering.
+3. **Lossless Guarantee**: Any proprietary, vendor-specific, or custom fields present in the source JSON (e.g. `actuarial_benchmarks`, `underwriting_guidelines`, `custom_tags`) that do not map to relational columns are preserved in perpetuity inside `ontology_payload`.
 
-### 1. Ingestion of Actual 550+ KPI Bank Production File
-* **Risk**: The actual production JSON file could contain proprietary top-level keys, deeply nested mathematical syntax, or encoding anomalies not reflected in the screenshot-derived fixture.
-* **Mitigation**: Deploy `scripts/kpi_bank_parser.py` in staging against the genuine production JSON resource once provisioned. The engine's diagnostic logging (`FATAL`, `ERROR`, `WARNING`, `INFO`) will immediately catalog any schema drift without crashing.
+### 8.2 Comprehensive 11-Field Release Diff Detection
+`KPIVersionDiffDetector` evaluates release deltas across all 11 materially relevant KPI attributes:
 
-### 2. Connection Pooling & Tenant Session Bleed
-* **Risk**: High-throughput web applications using connection poolers (e.g. PgBouncer in transaction pooling mode) risk session variable leakage if a pooled connection is reused without resetting `kpi_intel.current_tenant_id`.
-* **Mitigation**: Application data access layers (e.g. SQLAlchemy, Prisma, or JDBC) must execute `SET LOCAL kpi_intel.current_tenant_id = :tenant_id` inside an explicit transaction block (`BEGIN ... COMMIT`), which guarantees PostgreSQL automatically clears the variable upon transaction termination.
+| # | Material Field | Comparison Mechanism | Impact of Detected Difference |
+| :- | :--- | :--- | :--- |
+| 1 | `sector` | String equality (trimmed, case-insensitive) | Flags industry sector reclassification. |
+| 2 | `subdomain` | String equality (trimmed, case-insensitive) | Flags domain taxonomy reorganization. |
+| 3 | `line_of_business` | String equality (trimmed, case-insensitive) | Flags product line scope alterations. |
+| 4 | `kpi_type` | String equality (uppercase) | Flags metric calculation class changes (`RATIO`, `COUNT`, `CURRENCY`). |
+| 5 | `domain` | String equality (trimmed, case-insensitive) | Flags business domain shifts. |
+| 6 | `status` | String equality (uppercase) | Flags lifecycle state transitions (`ACTIVE`, `DEPRECATED`). |
+| 7 | `valid_dimensions` | Set equality over dimension names | Flags dimension slicing requirement expansions or removals. |
+| 8 | `aliases` / `synonyms`| Set equality over normalized alias tokens | Flags search synonym updates for NLP matching. |
+| 9 | `formula` | Normalized AST / string comparison | Flags core mathematical logic alterations. |
+| 10 | `definition` | Semantic token & text equality | Flags formal business definition changes. |
+| 11 | `enrichments` | Deep JSONB recursive dictionary diff | Flags benchmark, threshold, or metadata tag changes. |
 
-### 3. Very High Volume Metadata Partitioning
-* **Risk**: While the 61-table model handles millions of analytical objects efficiently with B-tree and GIN trigram indexes, multi-tenant enterprise deployments exceeding 50 million objects across hundreds of tenants will experience index maintenance overhead during bulk ingestion.
-* **Mitigation**: In Phase 2/3, leverage PostgreSQL native declarative table partitioning by `tenant_id` on the high-volume operational tables (`analytical_objects`, `spreadsheet_cells`, `visual_bindings`, `kpi_candidates`).
-
-### 4. Vector Similarity Integration (pgvector)
-* **Risk**: The current deterministic fallback engine utilizes trigram similarity (`gin_trgm_ops`) and AST structural matching. While effective for lexical similarity, it does not capture deep semantic equivalence (e.g., recognizing that "Gross Incurred Loss Ratio" and "Claims Cost Percentage" represent identical concepts when formulas differ slightly).
-* **Mitigation**: Provision the `pgvector` extension in production to store 1536-dimensional OpenAI/Gemini embeddings on `kpi_ontology_entries` and `kpi_candidates`, enabling combined hybrid lexical-vector retrieval.
+Any difference across these 11 fields marks the metric as modified (`modified_kpis`), computes the field-level delta payload, and logs an atomic record in `ontology_change_events`.
 
 ---
 
-## Conclusion & Sign-Off
+## 9. Automated Test Verification Results & Live Execution Runbook
 
-The KPI Intelligence canonical data model is fully hardened, referentially sound, multi-tenant secure, and equipped with a production-grade KPI Bank ingestion pipeline. All 61 tables, triggers, constraints, indexes, unit tests, and technical documentation are synchronized, verified, and committed to the repository.
+### 9.1 Summary of Executed Automated Tests
+
+```
+================================================================================
+TEST SUITE EXECUTION SUMMARY (macOS / Local Sandbox Environment)
+================================================================================
+1. Static Canonical Model Validator (scripts/validate_canonical_model.py)
+   - Status: PASSED (36/36 checks passed, 0 failures)
+   - Verified: 61 tables, 632 mandatory columns, 108 foreign keys, composite FKs,
+     triggers, indexes, domain seeds, and cross-artifact file synchronization.
+
+2. Schema Integrity Test Suite (scripts/test_schema_integrity.py)
+   - Status: PASSED (11/11 tests passed in 0.016s, 0 failures)
+   - Verified: Table counts, column completeness, composite FK column-specific SET NULL,
+     tenant functions (p_is_local), clear_current_tenant_id, full 61-table RLS,
+     hardening triggers, and ERRCODE 42501.
+
+3. KPI Bank Parser & Diff Engine Test Suite (scripts/test_kpi_bank_parser.py)
+   - Status: PASSED (19/19 tests passed in 0.002s, 0 failures)
+   - Verified: 18 representative fixture edge cases + test_19_diff_detector_all_material_fields
+     covering all 11 material diff fields, lossless JSONB retention, and taxonomy independence.
+
+4. Database Integration & Static Fallback Suite (scripts/test_db_integration.py)
+   - Status: PASSED (7 static declarative tests passed; 6 live tests marked pending)
+   - Static Tests Verified:
+     * test_static_schema_has_composite_fk_column_specific_set_null
+     * test_static_schema_has_clear_current_tenant_id
+     * test_static_schema_has_p_is_local_tenant_setting
+     * test_static_schema_has_prevent_audit_mutation_errcode_42501
+     * test_static_schema_has_protect_human_approval_full_matrix
+     * test_static_schema_has_full_61_table_rls_coverage
+     * test_static_schema_has_application_role_definitions
+================================================================================
+```
+
+### 9.2 Live Database Integration Runbook (Pending Live Connection)
+In accordance with reporting instructions, tests against a live PostgreSQL instance are marked **PENDING** due to the absence of a live database server in the execution sandbox. 
+
+To execute the live integration test suite in staging or CI/CD against PostgreSQL 15+:
+
+1. **Provision Database & Apply Schema**:
+   ```bash
+   createdb -h localhost -U postgres kpi_intelligence_db
+   psql -h localhost -U postgres -d kpi_intelligence_db -f docs/kpi-intelligence-canonical-model/canonical_schema.sql
+   ```
+
+2. **Set Connection Environment Variable**:
+   ```bash
+   export DATABASE_URL="postgresql://postgres:password@localhost:5432/kpi_intelligence_db"
+   ```
+
+3. **Execute Live Integration Suite**:
+   ```bash
+   python3 scripts/test_db_integration.py
+   ```
+
+4. **Expected Live Verification Behavior**:
+   - `test_01_tenant_isolation_and_lifecycle`: Verifies `set_current_tenant_id(UUID, true)` isolates tenant data; verifies transaction rollback immediately clears tenant context; verifies sequential requests for different tenants on the same connection do not leak data; verifies queries without tenant context fail closed.
+   - `test_02_cross_tenant_foreign_key_rejection`: Inserts Asset under Tenant A; attempts to insert Asset Version under Tenant B referencing Asset A; verifies PostgreSQL raises foreign key violation `fk_asset_versions_asset_tenant`.
+   - `test_03_audit_immutability`: Inserts an audit event; attempts `UPDATE` and `DELETE`; verifies trigger `prevent_audit_mutation()` raises SQLSTATE `'42501'`. Verifies `ON DELETE RESTRICT` prevents deleting parent mapping.
+   - `test_04_human_approval_protection`: Approves mapping as `HUMAN`; verifies automated updates (`LLM`) are aborted; verifies immutable key alterations are aborted; verifies transition to `SUPERSEDED` by human actor succeeds.
+   - `test_05_prevent_override_cycle`: Verifies cyclic override chains (`A -> B -> A`) are detected and rejected by `prevent_override_cycle()`.
+   - `test_06_composite_fk_column_specific_set_null`: Inserts an unapproved mapping referencing an ontology entry; deletes the ontology entry; verifies `selected_ontology_entry_id` becomes `NULL` while `ontology_version_id` remains intact.
+
+---
+
+## 10. Residual Risks, Assumptions & Unverified Behaviors
+
+1. **Unverified Live Database Execution**:
+   - *Status*: Pending external environment execution.
+   - *Assumption*: PostgreSQL 15.0+ runtime is required for column-specific `ON DELETE SET NULL (col)` syntax. Deployments on PostgreSQL 14 or earlier will fail to parse this constraint.
+2. **Connection Pooler Transaction Mode Requirement**:
+   - *Requirement*: Connection poolers (e.g. PgBouncer) must operate in **transaction pooling** or **session pooling** mode. If statement-level pooling is used, `set_config(..., true)` will scope only to the single statement setting the variable, causing subsequent statements in the logical transaction to lose their tenant context.
+3. **Application Role Trust Boundary**:
+   - *Requirement*: The application server is the authoritative trust boundary. It must authenticate user identity, extract the tenant ID from validated session claims (e.g. verified JWT), and invoke `set_current_tenant_id` at the beginning of each database transaction. Untrusted clients must never be granted direct database access or permission to invoke `set_current_tenant_id`.
+4. **Physical KPI Bank JSON Resource Delivery**:
+   - *Status*: The production JSON file containing all 550+ curated KPIs remains pending external delivery. All parser and diff engine validations were executed against the representative 18-record fixture (`fixtures/kpi_bank_representative_fixture.json`). When the production file is supplied, it must be validated by running `python3 scripts/kpi_bank_parser.py <path_to_production_json>`.

@@ -80,28 +80,34 @@ class TestCanonicalModelIntegrity(unittest.TestCase):
         )
 
     def test_tenant_isolation_functions(self):
-        """Verify tenant resolution helper functions are defined."""
+        """Verify tenant resolution helper functions are defined with transaction-local defaults."""
         self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.current_tenant_id()", self.sql_content)
-        self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.set_current_tenant_id", self.sql_content)
+        self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.set_current_tenant_id(p_tenant_id UUID, p_is_local BOOLEAN DEFAULT true)", self.sql_content)
+        self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.clear_current_tenant_id(p_is_local BOOLEAN DEFAULT true)", self.sql_content)
 
-    def test_row_level_security_enabled(self):
-        """Verify RLS is enabled on tenant-owned tables."""
-        tenant_tables = [
-            "assets", "asset_versions", "analytical_objects", "kpi_candidates",
-            "kpi_mapping_runs", "kpi_mappings", "mapping_audit_events"
-        ]
-        for tbl in tenant_tables:
-            self.assertIn(f"ALTER TABLE kpi_intel.{tbl} ENABLE ROW LEVEL SECURITY;", self.sql_content)
+    def test_row_level_security_enabled_all_tables(self):
+        """Verify RLS is enabled on all 61 canonical tables and forced on tenant tables."""
+        all_tables = [t for tables in EXPECTED_TABLES.values() for t in tables]
+        self.assertEqual(len(all_tables), 61, "Expected 61 tables for RLS audit")
+        for tbl in all_tables:
+            self.assertIn(f"ALTER TABLE kpi_intel.{tbl} ENABLE ROW LEVEL SECURITY;", self.sql_content, f"Missing RLS on {tbl}")
 
     def test_hardening_triggers_defined(self):
-        """Verify immutable governance triggers are defined and attached."""
+        """Verify immutable governance triggers are defined and attached with correct SQLSTATE."""
         self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.prevent_audit_mutation()", self.sql_content)
+        self.assertIn("USING ERRCODE = '42501';", self.sql_content)
         self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.protect_human_approval()", self.sql_content)
         self.assertIn("CREATE OR REPLACE FUNCTION kpi_intel.prevent_override_cycle()", self.sql_content)
         self.assertIn("trg_protect_human_approval", self.sql_content)
         self.assertIn("trg_mapping_audit_immutable", self.sql_content)
         self.assertIn("trg_ontology_audit_immutable", self.sql_content)
         self.assertIn("trg_prevent_override_cycle", self.sql_content)
+
+    def test_column_specific_set_null_foreign_keys(self):
+        """Verify composite FKs use PostgreSQL 15+ column-specific ON DELETE SET NULL."""
+        self.assertIn("ON DELETE SET NULL (selected_ontology_entry_id)", self.sql_content)
+        self.assertIn("ON DELETE SET NULL (mapping_candidate_id)", self.sql_content)
+        self.assertIn("ON DELETE SET NULL (approved_mapping_candidate_id)", self.sql_content)
 
     def test_full_validation_runner(self):
         """Execute full validation suite."""

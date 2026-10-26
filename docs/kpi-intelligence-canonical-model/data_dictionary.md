@@ -1131,11 +1131,11 @@ Every field is classified into one of five architectural tiers:
 - **Foreign Keys**:
   - `(kpi_candidate_id, asset_version_id)` references `kpi_candidates(kpi_candidate_id, asset_version_id)` ON DELETE CASCADE.
   - `(mapping_run_id, asset_version_id, ontology_version_id)` references `kpi_mapping_runs(mapping_run_id, asset_version_id, ontology_version_id)` ON DELETE CASCADE.
-  - `(selected_ontology_entry_id, ontology_version_id)` references `kpi_ontology_entries(ontology_entry_id, ontology_version_id)` ON DELETE SET NULL.
+  - `(selected_ontology_entry_id, ontology_version_id)` references `kpi_ontology_entries(ontology_entry_id, ontology_version_id) ON DELETE SET NULL (selected_ontology_entry_id)`.
 - **Constraints**: CHECK (`top_candidate_count BETWEEN 0 AND 3`).
-- **Triggers**: `trg_protect_human_approval` (prohibits automated overwriting of approved human mappings).
+- **Triggers**: `trg_protect_human_approval` (prohibits automated overwriting of approved human mappings, locks immutable candidate/version/ontology keys, and restricts status transitions to human SUPERSEDED/REVOKED/OVERRIDDEN).
 - **Populating Platforms**: System Inference Engine & Human Governance.
-- **Security / Redaction**: Row Level Security (RLS) enabled.
+- **Security / Redaction**: Row Level Security (RLS) enabled with FORCE ROW LEVEL SECURITY.
 
 | Column | SQL Type | Nullable | Default | Constraints | Classification | Description & Meaning |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -1225,7 +1225,7 @@ Every field is classified into one of five architectural tiers:
 - **Primary Key**: `mapping_review_id` (UUID).
 - **Foreign Keys**:
   - `kpi_mapping_id` references `kpi_mappings(kpi_mapping_id)` ON DELETE CASCADE.
-  - `(mapping_candidate_id, kpi_mapping_id)` references `kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id)` ON DELETE SET NULL.
+  - `(mapping_candidate_id, kpi_mapping_id)` references `kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id) ON DELETE SET NULL (mapping_candidate_id)`.
 - **Populating Platforms**: Governance Web Application.
 
 | Column | SQL Type | Nullable | Default | Constraints | Classification | Description & Meaning |
@@ -1247,12 +1247,12 @@ Every field is classified into one of five architectural tiers:
 - **Primary Key**: `mapping_approval_id` (UUID).
 - **Foreign Keys**:
   - `kpi_mapping_id` references `kpi_mappings(kpi_mapping_id)` ON DELETE CASCADE.
-  - `(approved_mapping_candidate_id, kpi_mapping_id)` references `kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id)` ON DELETE SET NULL.
+  - `(approved_mapping_candidate_id, kpi_mapping_id)` references `kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id) ON DELETE SET NULL (approved_mapping_candidate_id)`.
 - **Constraints**:
   - Partial Unique Index on `kpi_mapping_id` WHERE `approval_status = 'APPROVED'` (strictly enforces one active approval per mapping).
 - **Triggers**: Protected via `trg_protect_human_approval` ensuring immutable mapping binding.
 - **Populating Platforms**: Governance Web Application.
-- **Security / Redaction**: Row Level Security (RLS) enabled via parent mapping tenant join.
+- **Security / Redaction**: Row Level Security (RLS) enabled with FORCE ROW LEVEL SECURITY via parent mapping tenant join.
 
 | Column | SQL Type | Nullable | Default | Constraints | Classification | Description & Meaning |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -1274,14 +1274,14 @@ Every field is classified into one of five architectural tiers:
 - **Primary Key**: `override_id` (UUID).
 - **Foreign Keys**:
   - `kpi_mapping_id` references `kpi_mappings(kpi_mapping_id)` ON DELETE CASCADE.
-  - `(mapping_candidate_id, kpi_mapping_id)` references `kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id)` ON DELETE SET NULL.
+  - `(mapping_candidate_id, kpi_mapping_id)` references `kpi_mapping_candidates(mapping_candidate_id, kpi_mapping_id) ON DELETE SET NULL (mapping_candidate_id)`.
   - `previous_ontology_entry_id` references `kpi_ontology_entries(ontology_entry_id)` ON DELETE SET NULL.
   - `replacement_ontology_entry_id` references `kpi_ontology_entries(ontology_entry_id)` ON DELETE SET NULL.
   - `supersedes_override_id` references `mapping_overrides(override_id)` ON DELETE SET NULL.
 - **Constraints**: CHECK (`length(trim(override_justification)) > 0`).
 - **Triggers**: `trg_prevent_override_cycle` (prohibits cyclic and self-referencing `supersedes_override_id` chains).
 - **Populating Platforms**: Governance Web Application.
-- **Security / Redaction**: Row Level Security (RLS) enabled via parent mapping tenant join.
+- **Security / Redaction**: Row Level Security (RLS) enabled with FORCE ROW LEVEL SECURITY via parent mapping tenant join.
 
 | Column | SQL Type | Nullable | Default | Constraints | Classification | Description & Meaning |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
