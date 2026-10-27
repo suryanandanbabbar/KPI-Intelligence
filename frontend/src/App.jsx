@@ -65,6 +65,11 @@ export default function App() {
   const [metadataDomainFilter, setMetadataDomainFilter] = useState('');
   const [kpiBankSearchQuery, setKpiBankSearchQuery] = useState('');
   const [kpiBankDomainFilter, setKpiBankDomainFilter] = useState('');
+  const [expandedDomainSignals, setExpandedDomainSignals] = useState({});
+
+  const toggleDomainSignals = (code) => {
+    setExpandedDomainSignals(prev => ({ ...prev, [code]: !prev[code] }));
+  };
 
   const addToast = (type, message) => {
     const id = Date.now() + Math.random();
@@ -177,8 +182,11 @@ export default function App() {
         const llmCount = res.data.llm_processed_count ?? 0;
         const fbCount = res.data.fallback_processed_count ?? 0;
         const duration = res.data.duration_seconds ? ` in ${res.data.duration_seconds}s` : '';
+        const cachedCount = res.data.llm_cached_evaluations ?? 0;
+        const budgetNote = res.data.budget_exhausted ? ' (Budget limit reached; remaining fields evaluated via deterministic fallback)' : '';
+        const llmDetail = cachedCount > 0 ? `${llmCount} via LLM [${cachedCount} cached]` : `${llmCount} via LLM`;
 
-        const successMsg = `Mapping complete${duration}: ${total} fields evaluated (${llmCount} via LLM, ${fbCount} via deterministic fallback, ${reused} reused from learning).`;
+        const successMsg = `Mapping complete${duration}: ${total} fields evaluated (${llmDetail}, ${fbCount} via deterministic fallback, ${reused} reused from learning).${budgetNote}`;
         setPipelineState({
           status: 'succeeded',
           message: successMsg,
@@ -763,39 +771,6 @@ export default function App() {
           {/* VIEW 3: DOMAIN SEGREGATION */}
           {activeView === 'domains' && (
             <section className="view-panel active">
-              {/* Page Header with Consistent Action Group */}
-              <div className="page-intro-header">
-                <div className="page-intro-titles">
-                  <h2 className="page-intro-title">Domain Segregation</h2>
-                  <p className="page-intro-subtitle">
-                    Canonical model KPI mapping, domain classification, and human governance across segregated business domains.
-                  </p>
-                </div>
-                <div className="page-intro-actions">
-                  <div className="system-status-pill">
-                    <span className={`status-dot ${llmStatus?.llm_configured ? 'green' : 'orange'}`}></span>
-                    <span>
-                      {llmStatus?.llm_configured
-                        ? `Azure Llama (${llmStatus.llm_deployment_label || 'Configured'})`
-                        : 'Deterministic Fallback Active'}
-                    </span>
-                  </div>
-                  <button
-                    className="apple-button secondary"
-                    onClick={() => setIngestModalOpen(true)}
-                  >
-                    📥 Ingest Sources
-                  </button>
-                  <button
-                    className="apple-button primary"
-                    onClick={() => handleRunMapping(false)}
-                    disabled={pipelineState.status === 'processing'}
-                  >
-                    <span>{pipelineState.status === 'processing' ? '⏳ Processing...' : '⚡ Run Mapping Pipeline'}</span>
-                  </button>
-                </div>
-              </div>
-
               {/* Pipeline Status Banner if Active */}
               {pipelineState.status !== 'idle' && (
                 <div className={`pipeline-status-banner ${pipelineState.status}`} role="status">
@@ -837,7 +812,7 @@ export default function App() {
               )}
 
               {/* Canonical Segregated Business Domains Section */}
-              <div className="apple-card" style={{ marginTop: '20px' }}>
+              <div className="apple-card" style={{ marginTop: pipelineState.status !== 'idle' ? '20px' : '0px' }}>
                 <div className="apple-card-header">
                   <div className="apple-card-title-group">
                     <h3 className="apple-card-title">Canonical Segregated Business Domains</h3>
@@ -856,18 +831,23 @@ export default function App() {
                         : (d.subtypes && d.subtypes.length > 0)
                         ? d.subtypes
                         : [];
+                      const isExpanded = !!expandedDomainSignals[d.code];
+                      const visibleSignals = isExpanded ? signals : signals.slice(0, 4);
+
                       return (
                         <div key={d.code} className="domain-dashboard-card" data-domain={d.code}>
-                          {/* 1. Header: Domain Name & Code Identifier */}
+                          {/* 1. Header: Domain Display Name (Primary) & Canonical Identifier (Secondary Metadata) */}
                           <div className="domain-card-header-row">
                             <div className="domain-card-title-group">
-                              <span className="domain-card-icon">{DOMAIN_ICONS[d.code] || '🛡️'}</span>
-                              <h4 className="domain-card-name">{d.name}</h4>
+                              <span className="domain-card-icon" aria-hidden="true">{DOMAIN_ICONS[d.code] || '🛡️'}</span>
+                              <div className="domain-card-title-text">
+                                <h4 className="domain-card-name">{d.name}</h4>
+                                <span className="domain-card-code-secondary">{d.code}</span>
+                              </div>
                             </div>
-                            <span className="domain-badge">{d.code}</span>
                           </div>
 
-                          {/* 2. Field-count metric */}
+                          {/* 2. Associated Canonical Field Count Metric */}
                           <div className="domain-metric-row">
                             <div className="domain-metric-value">{count}</div>
                             <div className="domain-metric-label">
@@ -875,35 +855,50 @@ export default function App() {
                             </div>
                           </div>
 
-                          {/* 3. Business description */}
-                          <p className="domain-card-description">{d.description}</p>
+                          {/* 3. Business Description */}
+                          <p className="domain-card-description">{d.description || 'No business description provided.'}</p>
 
-                          {/* 4. Key signals */}
+                          {/* 4. Key Signals with density control and interactive expansion */}
                           <div className="domain-signals-section">
-                            <span className="domain-signals-heading">Key Signals</span>
+                            <div className="domain-signals-header-row">
+                              <span className="domain-signals-heading">Key Signals</span>
+                              {signals.length > 0 && (
+                                <span className="domain-signals-count-badge">{signals.length}</span>
+                              )}
+                            </div>
                             {signals.length > 0 ? (
                               <div className="domain-signals-chips">
-                                {signals.slice(0, 7).map((s, idx) => (
+                                {visibleSignals.map((s, idx) => (
                                   <span key={idx} className="signal-chip">{s}</span>
                                 ))}
-                                {signals.length > 7 && (
-                                  <span className="signal-chip-more">+{signals.length - 7} more</span>
+                                {signals.length > 4 && (
+                                  <button
+                                    type="button"
+                                    className="signal-chip-more-btn"
+                                    onClick={() => toggleDomainSignals(d.code)}
+                                    aria-expanded={isExpanded}
+                                    title={isExpanded ? 'Collapse additional signals' : `Show ${signals.length - 4} more signals`}
+                                  >
+                                    {isExpanded ? 'Show less' : `+${signals.length - 4} more`}
+                                  </button>
                                 )}
                               </div>
                             ) : (
-                              <div className="domain-signals-empty">No key signals identified</div>
+                              <div className="domain-signals-empty">No key signals registered</div>
                             )}
                           </div>
 
-                          {/* 5. Classification or governance status */}
+                          {/* 5. Classification Boundary & Consistent View Fields Action */}
                           <div className="domain-card-footer">
                             <span className="domain-boundary-pill">Strict Domain Boundary</span>
                             <button
-                              className="apple-button text-button small"
+                              type="button"
+                              className="apple-button text-button small domain-view-fields-btn"
                               onClick={() => {
                                 setMetadataDomainFilter(d.code);
                                 setActiveView('metadata');
                               }}
+                              aria-label={`View canonical fields in domain ${d.name}`}
                             >
                               View Fields →
                             </button>

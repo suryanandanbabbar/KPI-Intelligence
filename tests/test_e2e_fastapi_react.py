@@ -180,6 +180,44 @@ class TestE2EFastAPIReact(unittest.TestCase):
         event_types = [e["event_type"] for e in audit_events]
         self.assertIn("MAPPING_APPROVED", event_types)
 
+    def test_domain_segregation_ui_controls_not_duplicated_and_cards_refined(self):
+        """
+        Verifies that:
+        1. The Domain Segregation view does not duplicate page header controls (no page-intro-header).
+        2. Top-bar in application shell remains the single global owner of actions and title.
+        3. Domain cards use display name as primary heading and canonical code as secondary metadata.
+        4. Key signals density control (+N more button) is implemented.
+        """
+        app_jsx_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "src", "App.jsx"))
+        with open(app_jsx_path, "r", encoding="utf-8") as f:
+            app_code = f.read()
+
+        # 1. No duplicated header controls
+        self.assertNotIn("page-intro-header", app_code, "page-intro-header must be removed to avoid duplicating top-bar")
+        self.assertIn("top-bar", app_code)
+        self.assertIn("Run Mapping Pipeline", app_code)
+
+        # 2. Refined Domain Card Structure
+        self.assertIn("domain-dashboard-card", app_code)
+        self.assertIn("domain-card-name", app_code)
+        self.assertIn("domain-card-code-secondary", app_code)
+        self.assertIn("domain-metric-row", app_code)
+        self.assertIn("domain-signals-section", app_code)
+        self.assertIn("signal-chip-more-btn", app_code)
+        self.assertIn("toggleDomainSignals", app_code)
+        self.assertIn("Strict Domain Boundary", app_code)
+        self.assertIn("View Fields →", app_code)
+
+        # 3. CSS checks for card consistency and tokens
+        css_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "frontend", "styles.css"))
+        with open(css_path, "r", encoding="utf-8") as f:
+            css_code = f.read()
+
+        self.assertIn(".domain-card-code-secondary", css_code)
+        self.assertIn(".signal-chip-more-btn", css_code)
+        self.assertIn(".domain-dashboard-card", css_code)
+        self.assertIn(".domain-cards-grid", css_code)
+
 
 if __name__ == "__main__":
     unittest.main()

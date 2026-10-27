@@ -279,12 +279,21 @@ class GovernanceService:
         auto_reused_count = 0
         llm_processed_count = 0
         fallback_processed_count = 0
+        llm_requests_attempted = 0
+        llm_successful_evaluations = 0
+        llm_failed_or_timed_out = 0
+        llm_cached_evaluations = 0
+        llm_latencies_ms: List[float] = []
         mappings_produced: List[Dict[str, Any]] = []
 
-        # Circuit breaker and total execution budget controls
+        # Circuit breaker, in-run cache, and total execution budget controls
+        in_run_cache: Dict[Any, Any] = {}
         llm_circuit_open = False
         llm_circuit_reason: Optional[str] = None
+        budget_exhausted = False
         pipeline_budget_seconds = float(os.getenv("KPI_PIPELINE_TOTAL_BUDGET_SECONDS", "90.0"))
+        budget_buffer_seconds = min(15.0, pipeline_budget_seconds * 0.2)
+        budget_threshold_seconds = max(0.001, pipeline_budget_seconds - budget_buffer_seconds)
         total_ranking_time_ms = 0.0
 
         for idx, field in enumerate(fields):
@@ -293,9 +302,10 @@ class GovernanceService:
             elapsed_so_far = _pytime.time() - t0
 
             # Guard against exceeding total execution budget
-            # If remaining budget is less than 15s, trip circuit to guarantee timely completion
-            if elapsed_so_far >= (pipeline_budget_seconds - 15.0) and not llm_circuit_open and not force_fallback:
+            # If elapsed time reaches threshold, fast-fail remaining fields to deterministic fallback
+            if elapsed_so_far >= budget_threshold_seconds and not llm_circuit_open and not force_fallback:
                 llm_circuit_open = True
+                budget_exhausted = True
                 llm_circuit_reason = (
                     f"PIPELINE_BUDGET_REACHED: Elapsed time ({elapsed_so_far:.1f}s) reached threshold of "
                     f"{pipeline_budget_seconds:.1f}s budget. Fast-falling back remaining fields."
@@ -340,14 +350,39 @@ class GovernanceService:
                 continue
 
             # 2. Invoke Matching Orchestrator (Stages 4-7)
-            t_field_rank_start = _pytime.time()
-            match_res = self.matcher.discover_and_rank_candidates(
-                metadata_field=field,
-                domain=field_domain,
-                force_fallback=field_force_fallback,
-            )
-            t_field_rank_end = _pytime.time()
-            total_ranking_time_ms += (t_field_rank_end - t_field_rank_start) * 1000
+            import copy
+            from backend.matching.orchestrator import compute_input_fingerprint
+            field_fp = compute_input_fingerprint(field, field_domain)
+
+            if not field_force_fallback and field_fp in in_run_cache:
+                match_res = copy.deepcopy(in_run_cache[field_fp])
+                match_res["cached"] = True
+            else:
+                t_field_rank_start = _pytime.time()
+                match_res = self.matcher.discover_and_rank_candidates(
+                    metadata_field=field,
+                    domain=field_domain,
+                    force_fallback=field_force_fallback,
+                )
+                t_field_rank_end = _pytime.time()
+                total_ranking_time_ms += (t_field_rank_end - t_field_rank_start) * 1000
+
+                # Cache successful LLM outcome for deduplication across identical signatures
+                if not match_res.get("fallback_used") and match_res.get("candidate_count", 0) > 0:
+                    in_run_cache[field_fp] = match_res
+
+            # Telemetry tracking for LLM attempts, successes, and cache hits
+            if match_res.get("cached"):
+                llm_cached_evaluations += 1
+            elif match_res.get("llm_attempted"):
+                llm_requests_attempted += 1
+                if match_res.get("llm_success"):
+                    llm_successful_evaluations += 1
+                    lat = match_res.get("llm_latency_ms", 0.0)
+                    if lat > 0:
+                        llm_latencies_ms.append(lat)
+                else:
+                    llm_failed_or_timed_out += 1
 
             # If an unforced LLM failure or timeout occurred, trip circuit breaker for remaining fields
             if match_res["fallback_used"] and not force_fallback and not llm_circuit_open:
@@ -393,7 +428,7 @@ class GovernanceService:
                 mapping_run_id=run_id,
                 selected_ontology_entry_id=primary_rec.get("kpi_id") if primary_rec else None,
                 mapping_status="PROPOSED",
-                decision_source=primary_rec.get("decision_source", "DETERMINISTIC_FALLBACK" if match_res["fallback_used"] else "LLM_INFERENCE"),
+                decision_source=primary_rec.get("decision_source", "DETERMINISTIC_FALLBACK" if match_res["fallback_used"] else ("LLM_INFERENCE_CACHED" if match_res.get("cached") else "LLM_INFERENCE")),
                 mapping_engine_version=match_res["matching_engine"],
                 input_fingerprint=match_res["input_fingerprint"],
                 confidence_band=primary_rec.get("confidence_code", "UNCLASSIFIED"),
@@ -432,26 +467,72 @@ class GovernanceService:
             persist_duration_ms,
         )
 
-        # Stage 9: Overall Duration
+        # Stage 9: Duration & Structured Measurement Metrics
+        llm_avg_latency_ms = round(sum(llm_latencies_ms) / len(llm_latencies_ms), 2) if llm_latencies_ms else 0.0
+        sorted_latencies = sorted(llm_latencies_ms)
+        llm_p95_latency_ms = round(sorted_latencies[int(len(sorted_latencies) * 0.95)], 2) if sorted_latencies else 0.0
+        
+        # Retry wait duration from client if available
+        llm_retry_wait_ms = 0.0
+        if hasattr(self.matcher, "llm_engine") and hasattr(self.matcher.llm_engine, "client") and self.matcher.llm_engine.client:
+            llm_retry_wait_ms = round(getattr(self.matcher.llm_engine.client, "total_retry_wait_seconds", 0.0) * 1000, 2)
+            
+        non_llm_duration_ms = round(max(0.0, (duration * 1000) - sum(llm_latencies_ms)), 2)
+
+        if llm_processed_count == total_fields and total_fields > 0:
+            coverage_type = "FULL_LLM"
+        elif llm_processed_count > 0:
+            coverage_type = "PARTIAL_LLM"
+        else:
+            coverage_type = "DETERMINISTIC_ONLY"
+
+        if budget_exhausted:
+            explanation = (
+                f"Pipeline total execution budget of {pipeline_budget_seconds:.1f}s reached at threshold. "
+                f"{llm_processed_count} fields evaluated via LLM ({llm_successful_evaluations} direct calls, {llm_cached_evaluations} fingerprint cache hits). "
+                f"Remaining {fallback_processed_count} fields safely processed via deterministic fallback."
+            )
+        elif llm_circuit_open:
+            explanation = (
+                f"LLM circuit breaker tripped ({llm_circuit_reason}). "
+                f"{llm_processed_count} fields evaluated via LLM. Remaining fields evaluated via deterministic fallback."
+            )
+        elif force_fallback:
+            explanation = "Manual force fallback was requested. All fields evaluated via deterministic matching."
+        else:
+            explanation = f"Mapping complete: {llm_processed_count} evaluated via LLM, {fallback_processed_count} via fallback, {auto_reused_count} reused from learning."
+
         logger.info(
-            "Stage 9/9 [PIPELINE_COMPLETED]: Tenant %s completed in %.2fs: %d fields (LLM: %d, Fallback: %d, Reused: %d, CircuitOpen: %s)",
+            "Stage 9/9 [PIPELINE_COMPLETED]: Tenant %s completed in %.2fs: %d fields (LLM: %d [direct=%d, cached=%d], Fallback: %d, Reused: %d, Coverage: %s, BudgetExhausted: %s)",
             tenant_id,
             duration,
             total_fields,
             llm_processed_count,
+            llm_successful_evaluations,
+            llm_cached_evaluations,
             fallback_processed_count,
             auto_reused_count,
-            llm_circuit_open,
+            coverage_type,
+            budget_exhausted,
         )
 
         return {
             "mapping_run_id": run_id,
             "total_fields": total_fields,
             "total_fields_processed": total_fields,
+            "fields_considered": total_fields,
             "auto_reused_overrides": auto_reused_count,
             "auto_reused_from_learning": auto_reused_count,
             "llm_processed_count": llm_processed_count,
             "fallback_processed_count": fallback_processed_count,
+            "llm_requests_attempted": llm_requests_attempted,
+            "llm_successful_evaluations": llm_successful_evaluations,
+            "llm_failed_or_timed_out": llm_failed_or_timed_out,
+            "llm_cached_evaluations": llm_cached_evaluations,
+            "coverage_type": coverage_type,
+            "budget_exhausted": budget_exhausted,
+            "budget_limit_seconds": pipeline_budget_seconds,
+            "explanation": explanation,
             "status": "COMPLETED",
             "fallback_used": (fallback_processed_count > 0 or force_fallback),
             "fallback_reason": llm_circuit_reason if llm_circuit_open else None,
@@ -467,6 +548,10 @@ class GovernanceService:
                 "candidate_ranking_ms": round(total_ranking_time_ms, 2),
                 "persistence_ms": persist_duration_ms,
                 "overall_duration_seconds": duration,
+                "llm_avg_latency_ms": llm_avg_latency_ms,
+                "llm_p95_latency_ms": llm_p95_latency_ms,
+                "llm_retry_wait_ms": llm_retry_wait_ms,
+                "non_llm_duration_ms": non_llm_duration_ms,
             },
         }
 

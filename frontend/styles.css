@@ -2183,33 +2183,49 @@ body.theme-dark .pipeline-status-banner.failed {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  gap: 10px;
+  gap: 12px;
 }
 
 .domain-card-title-group {
   display: flex;
-  align-items: center;
-  gap: 10px;
+  align-items: flex-start;
+  gap: 12px;
 }
 
 .domain-card-icon {
-  font-size: 20px;
-  line-height: 1;
+  font-size: 22px;
+  line-height: 1.1;
+  padding-top: 2px;
+  flex-shrink: 0;
+}
+
+.domain-card-title-text {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
 }
 
 .domain-card-name {
-  font-size: 15px;
+  font-size: 15.5px;
   font-weight: 650;
   color: var(--text-primary);
   margin: 0;
   line-height: 1.25;
 }
 
+.domain-card-code-secondary {
+  font-size: 11px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-weight: 500;
+  color: var(--text-tertiary);
+  letter-spacing: 0.03em;
+}
+
 .domain-metric-row {
   display: flex;
   align-items: baseline;
   gap: 8px;
-  padding: 6px 0;
+  padding: 4px 0 2px 0;
 }
 
 .domain-metric-row .domain-metric-value {
@@ -2227,7 +2243,7 @@ body.theme-dark .pipeline-status-banner.failed {
 
 .domain-card-description {
   font-size: 12.5px;
-  line-height: 1.45;
+  line-height: 1.48;
   color: var(--text-secondary);
   margin: 0;
   flex: 1;
@@ -2236,11 +2252,17 @@ body.theme-dark .pipeline-status-banner.failed {
 .domain-signals-section {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
   background-color: var(--bg-primary);
   padding: 10px 12px;
   border-radius: var(--radius-md);
   border: 1px solid var(--border-subtle);
+}
+
+.domain-signals-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
 }
 
 .domain-signals-heading {
@@ -2251,16 +2273,31 @@ body.theme-dark .pipeline-status-banner.failed {
   color: var(--text-tertiary);
 }
 
+.domain-signals-count-badge {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: 10px;
+  background-color: rgba(0, 0, 0, 0.05);
+  color: var(--text-tertiary);
+}
+
+body.theme-dark .domain-signals-count-badge {
+  background-color: rgba(255, 255, 255, 0.08);
+  color: var(--text-secondary);
+}
+
 .domain-signals-chips {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  align-items: center;
 }
 
 .signal-chip {
   font-size: 11px;
   font-weight: 500;
-  padding: 2px 7px;
+  padding: 2.5px 8px;
   border-radius: 4px;
   background-color: rgba(0, 113, 227, 0.08);
   color: var(--accent-primary);
@@ -2273,18 +2310,37 @@ body.theme-dark .signal-chip {
   border-color: rgba(41, 151, 255, 0.25);
 }
 
-.signal-chip-more {
-  font-size: 10.5px;
+.signal-chip-more-btn {
+  font-size: 11px;
   font-weight: 600;
-  color: var(--text-tertiary);
-  padding: 2px 4px;
-  align-self: center;
+  color: var(--accent-primary);
+  background: transparent;
+  border: 1px dashed rgba(0, 113, 227, 0.35);
+  border-radius: 4px;
+  padding: 2px 7px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+}
+
+.signal-chip-more-btn:hover {
+  background-color: rgba(0, 113, 227, 0.08);
+  border-style: solid;
+}
+
+body.theme-dark .signal-chip-more-btn {
+  color: #64b5f6;
+  border-color: rgba(41, 151, 255, 0.4);
+}
+
+body.theme-dark .signal-chip-more-btn:hover {
+  background-color: rgba(41, 151, 255, 0.15);
 }
 
 .domain-signals-empty {
   font-size: 11.5px;
   font-style: italic;
   color: var(--text-tertiary);
+  padding: 2px 0;
 }
 
 .domain-card-footer {
@@ -2293,6 +2349,11 @@ body.theme-dark .signal-chip {
   align-items: center;
   padding-top: 10px;
   border-top: 1px solid var(--border-light);
+}
+
+.domain-view-fields-btn {
+  font-weight: 600;
+  color: var(--accent-primary);
 }
 
 .domain-boundary-pill {

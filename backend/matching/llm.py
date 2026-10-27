@@ -43,6 +43,7 @@ class LLMMatchingEngine:
         self.config = config or AzureLlamaConfig.from_env()
         self.client = client or (AzureLlamaClient(self.config) if self.config.is_configured else None)
         self.model_name = self.config.effective_deployment_name
+        self.last_latency_ms: float = 0.0
 
     @property
     def is_configured(self) -> bool:
@@ -123,6 +124,7 @@ class LLMMatchingEngine:
 
         t_resp_received = _pytime.time()
         req_duration_ms = round((t_resp_received - t_req_start) * 1000, 2)
+        self.last_latency_ms = req_duration_ms
         logger.info(
             "Stage 5/9 [LLM_RESPONSE_RECEIVED]: Field '%s' received model response in %.2fms (deployment='%s')",
             field_label,

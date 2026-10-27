@@ -76,6 +76,8 @@ class AzureLlamaConfig:
     max_retries: int = 1
     max_timeout_retries: Optional[int] = None
     retry_backoff_seconds: float = 1.0
+    concurrency: int = 3
+    pipeline_total_budget_seconds: float = 90.0
 
     @classmethod
     def from_env(cls) -> "AzureLlamaConfig":
@@ -89,13 +91,19 @@ class AzureLlamaConfig:
         api_version = cls._clean_env("AZURE_OPENAI_API_VERSION")
 
         timeout_env = os.getenv("AZURE_LLM_TIMEOUT_SECONDS") or os.getenv("KPI_LLM_TIMEOUT_SECONDS")
-        timeout = float(timeout_env) if timeout_env else 45.0
+        timeout = float(timeout_env) if timeout_env else 30.0
 
         retries_env = os.getenv("AZURE_LLM_MAX_RETRIES") or os.getenv("KPI_LLM_MAX_RETRIES")
         max_retries = int(retries_env) if retries_env else 1
 
         timeout_retries_env = os.getenv("AZURE_LLM_MAX_TIMEOUT_RETRIES") or os.getenv("KPI_LLM_MAX_TIMEOUT_RETRIES")
         max_timeout_retries = int(timeout_retries_env) if timeout_retries_env else 0
+
+        concurrency_env = os.getenv("KPI_LLM_CONCURRENCY")
+        concurrency = int(concurrency_env) if concurrency_env else 3
+
+        budget_env = os.getenv("KPI_PIPELINE_TOTAL_BUDGET_SECONDS")
+        total_budget = float(budget_env) if budget_env else 90.0
 
         return cls(
             azure_deployment=deployment,
@@ -106,6 +114,8 @@ class AzureLlamaConfig:
             timeout_seconds=timeout,
             max_retries=max_retries,
             max_timeout_retries=max_timeout_retries,
+            concurrency=concurrency,
+            pipeline_total_budget_seconds=total_budget,
         )
 
     @staticmethod
@@ -200,6 +210,8 @@ class AzureLlamaConfig:
             "timeout_seconds": self.timeout_seconds,
             "max_retries": self.max_retries,
             "max_timeout_retries": self.effective_max_timeout_retries,
+            "concurrency": self.concurrency,
+            "pipeline_total_budget_seconds": self.pipeline_total_budget_seconds,
         }
 
     def __repr__(self) -> str:

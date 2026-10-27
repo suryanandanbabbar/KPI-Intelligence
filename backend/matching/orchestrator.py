@@ -67,22 +67,23 @@ class MatchingOrchestrator:
         domain: Optional[str] = None,
         historical_overrides: Optional[List[Dict[str, Any]]] = None,
         force_fallback: bool = False,
+        cache: Optional[Dict[Any, Any]] = None,
+        **kwargs: Any,
     ) -> Dict[str, Any]:
         """
         Executes complete candidate discovery and ranking for a single metadata field.
         Returns mapping execution metadata and up to 3 ranked candidates with structured evidence.
+        Supports in-run fingerprint caching to eliminate duplicate LLM requests.
         """
         fingerprint = compute_input_fingerprint(metadata_field, domain)
         started_at = datetime.now(timezone.utc).isoformat()
 
         # ---------------------------------------------------------------------
         # Stage A: Candidate Retrieval
+        # ---------------------------------------------------------------------
         import time as _pytime
         t_stage7_start = _pytime.time()
 
-        # ---------------------------------------------------------------------
-        # Stage A: Candidate Retrieval (Bounded to top 8 candidates to avoid oversized prompts)
-        # ---------------------------------------------------------------------
         field_name = metadata_field.get("name") or metadata_field.get("candidate_name") or ""
         field_expr = metadata_field.get("expression") or metadata_field.get("candidate_expression") or ""
         query_text = f"{field_name} {field_expr}".strip()
@@ -102,13 +103,40 @@ class MatchingOrchestrator:
                 "input_fingerprint": fingerprint,
                 "matching_engine": self.deterministic_engine.VERSION,
                 "primary_engine": "NONE",
-                "fallback_used": False,
-                "fallback_reason": None,
+                "fallback_used": True,
+                "fallback_reason": "NO_CANDIDATES_IN_BANK",
                 "candidate_count": 0,
                 "top_candidates": [],
                 "started_at": started_at,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
                 "ranking_duration_ms": round((_pytime.time() - t_stage7_start) * 1000, 2),
+                "llm_attempted": False,
+                "llm_success": False,
+                "cached": False,
+                "llm_latency_ms": 0.0,
+            }
+
+        # Check in-run fingerprint cache
+        pool_signature = tuple(sorted([str(c.get("kpi_id") or c.get("ontology_entry_id") or "") for c in pool]))
+        cache_key = (fingerprint, pool_signature)
+        if not force_fallback and cache is not None and cache_key in cache:
+            cached_entry = cache[cache_key]
+            logger.info("Stage 7/9 [CACHE_HIT]: Reusing in-run ranking for field '%s' (fingerprint=%s)", field_name, fingerprint)
+            return {
+                "input_fingerprint": fingerprint,
+                "matching_engine": cached_entry["matching_engine"],
+                "primary_engine": cached_entry["primary_engine"],
+                "fallback_used": cached_entry["fallback_used"],
+                "fallback_reason": cached_entry.get("fallback_reason"),
+                "candidate_count": cached_entry["candidate_count"],
+                "top_candidates": [dict(c) for c in cached_entry["top_candidates"]],
+                "started_at": started_at,
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+                "ranking_duration_ms": 0.0,
+                "llm_attempted": False,
+                "llm_success": cached_entry.get("llm_success", False),
+                "cached": True,
+                "llm_latency_ms": 0.0,
             }
 
         # ---------------------------------------------------------------------
@@ -119,8 +147,12 @@ class MatchingOrchestrator:
         primary_engine = "LLM_INFERENCE"
         fallback_used = False
         fallback_reason: Optional[str] = None
+        llm_attempted = False
+        llm_success = False
+        llm_latency_ms = 0.0
 
         if not force_fallback:
+            llm_attempted = True
             try:
                 top_candidates = self.llm_engine.match_and_rank(
                     metadata_field=metadata_field,
@@ -129,6 +161,8 @@ class MatchingOrchestrator:
                     historical_overrides=historical_overrides,
                     max_candidates=3,
                 )
+                llm_success = len(top_candidates) > 0
+                llm_latency_ms = getattr(self.llm_engine, "last_latency_ms", 0.0)
             except LLMMatchingError as ex:
                 fallback_used = True
                 fallback_reason = f"{ex.category}: {ex.message}" if ex.message else (ex.category or "LLM_ERROR")
@@ -167,7 +201,7 @@ class MatchingOrchestrator:
             len(top_candidates),
         )
 
-        return {
+        result_dict = {
             "input_fingerprint": fingerprint,
             "matching_engine": matching_engine,
             "primary_engine": primary_engine,
@@ -178,7 +212,17 @@ class MatchingOrchestrator:
             "started_at": started_at,
             "completed_at": completed_at,
             "ranking_duration_ms": ranking_duration_ms,
+            "llm_attempted": llm_attempted,
+            "llm_success": llm_success,
+            "cached": False,
+            "llm_latency_ms": llm_latency_ms,
         }
+
+        # Store in in-run cache if successful LLM evaluation occurred
+        if cache is not None and not fallback_used and llm_success:
+            cache[cache_key] = result_dict
+
+        return result_dict
 
 
 # Singleton instance helper

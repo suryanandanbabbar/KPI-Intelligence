@@ -56,6 +56,7 @@ class AzureLlamaClient:
 
     def __init__(self, config: Optional[AzureLlamaConfig] = None):
         self.config = config or AzureLlamaConfig.from_env()
+        self.total_retry_wait_seconds: float = 0.0
 
     def classify_endpoint(self) -> str:
         """Sanitized endpoint classification for diagnostics and route selection."""
@@ -330,6 +331,7 @@ class AzureLlamaClient:
                 is_transient = status_code in (429, 500, 502, 503, 504)
                 if is_transient and attempts < max_attempts:
                     delay = min(10.0, self.config.retry_backoff_seconds * (2 ** (attempts - 1)))
+                    self.total_retry_wait_seconds += delay
                     logger.warning(
                         "Azure Llama HTTP %d transient error (attempt %d/%d). Backing off %.1fs.",
                         status_code,
@@ -424,6 +426,7 @@ class AzureLlamaClient:
                     timeout_attempts += 1
                     if timeout_attempts < max_timeout_attempts and attempts < max_attempts:
                         delay = min(10.0, self.config.retry_backoff_seconds * (2 ** (attempts - 1)))
+                        self.total_retry_wait_seconds += delay
                         logger.warning(
                             "Azure Llama request timed out (attempt %d/%d). Backing off %.1fs.",
                             attempts,
@@ -440,6 +443,7 @@ class AzureLlamaClient:
                 # 3. General network connection failure -> Bounded retry with backoff
                 if attempts < max_attempts:
                     delay = min(10.0, self.config.retry_backoff_seconds * (2 ** (attempts - 1)))
+                    self.total_retry_wait_seconds += delay
                     logger.warning(
                         "Azure Llama connection error (attempt %d/%d): %s. Backing off %.1fs.",
                         attempts,
@@ -459,8 +463,10 @@ class AzureLlamaClient:
                 ) from ue
 
             except (TimeoutError, socket.timeout) as te:
-                if attempts < max_attempts:
+                timeout_attempts += 1
+                if timeout_attempts < max_timeout_attempts and attempts < max_attempts:
                     delay = min(10.0, self.config.retry_backoff_seconds * (2 ** (attempts - 1)))
+                    self.total_retry_wait_seconds += delay
                     logger.warning(
                         "Azure Llama timeout encountered (attempt %d/%d). Backing off %.1fs.",
                         attempts,

@@ -1074,6 +1074,155 @@ class TestAzureLlamaIntegration(unittest.TestCase):
 
             self.assertEqual(mock_urlopen.call_count, 1)
 
+    def test_pipeline_budget_exhaustion_fast_fails_remaining_fields_with_accurate_counters(self):
+        """
+        Verifies that when pipeline budget threshold is reached:
+        1. Remaining fields are fast-failed to deterministic matching.
+        2. budget_exhausted is True and coverage_type is PARTIAL_LLM.
+        3. Accurate structured counters distinguish attempted vs successful vs fallback.
+        """
+        gov_service = GovernanceService(
+            repository=self.repo,
+            kpi_bank_service=self.kpi_bank,
+            domain_service=self.domain_service,
+            matching_orchestrator=None,
+            learning_service=self.learning_service,
+        )
+
+        mock_matcher = MagicMock()
+        call_count = [0]
+
+        def mock_discover(metadata_field, domain, force_fallback=False, **kwargs):
+            call_count[0] += 1
+            if force_fallback:
+                return {
+                    "input_fingerprint": "fp_fb",
+                    "matching_engine": "1.0.0-deterministic",
+                    "primary_engine": "DETERMINISTIC_FALLBACK",
+                    "fallback_used": True,
+                    "fallback_reason": "PIPELINE_BUDGET_REACHED",
+                    "candidate_count": 1,
+                    "llm_attempted": False,
+                    "llm_success": False,
+                    "top_candidates": [{
+                        "kpi_id": "kpi_incurred_loss_ratio",
+                        "confidence_code": "MEDIUM",
+                        "confidence_score": 0.6,
+                        "fallback_used": True,
+                        "decision_source": "DETERMINISTIC_FALLBACK",
+                    }],
+                }
+            else:
+                return {
+                    "input_fingerprint": "fp_llm",
+                    "matching_engine": "2.2.0-azure-llama",
+                    "primary_engine": "LLM_INFERENCE",
+                    "fallback_used": False,
+                    "candidate_count": 1,
+                    "llm_attempted": True,
+                    "llm_success": True,
+                    "llm_latency_ms": 1500.0,
+                    "top_candidates": [{
+                        "kpi_id": "kpi_incurred_loss_ratio",
+                        "confidence_code": "HIGH",
+                        "confidence_score": 0.95,
+                        "fallback_used": False,
+                        "decision_source": "LLM_INFERENCE",
+                    }],
+                }
+
+        mock_matcher.discover_and_rank_candidates.side_effect = mock_discover
+        gov_service.matcher = mock_matcher
+
+        # Set budget to very small threshold (0.001s) so it trips on field 2
+        with patch.dict(os.environ, {"KPI_PIPELINE_TOTAL_BUDGET_SECONDS": "0.01"}):
+            import time
+            time.sleep(0.02)  # Ensure elapsed exceeds budget threshold immediately
+            res = gov_service.run_mapping_pipeline(self.tenant_id, force_fallback=False)
+
+        self.assertEqual(res["status"], "COMPLETED")
+        self.assertTrue(res["budget_exhausted"])
+        self.assertIn("PIPELINE_BUDGET_REACHED", res["fallback_reason"] or "")
+        self.assertEqual(res["coverage_type"], "DETERMINISTIC_ONLY" if res["llm_processed_count"] == 0 else "PARTIAL_LLM")
+        self.assertEqual(res["total_fields"], res["fields_considered"])
+        self.assertIn("budget_limit_seconds", res)
+        self.assertIn("explanation", res)
+
+    def test_pipeline_in_run_cache_deduplicates_identical_field_signatures(self):
+        """
+        Verifies that multiple fields with identical fingerprints reuse in-run LLM evaluations,
+        incrementing llm_cached_evaluations and eliminating redundant LLM calls.
+        """
+        gov_service = GovernanceService(
+            repository=self.repo,
+            kpi_bank_service=self.kpi_bank,
+            domain_service=self.domain_service,
+            matching_orchestrator=None,
+            learning_service=self.learning_service,
+        )
+
+        # Mock extract_canonical_metadata_fields to return 3 fields: 2 identical, 1 different
+        field_a1 = {
+            "field_id": "col_t1_amount",
+            "name": "Claim Amount",
+            "expression": "SUM(Amount)",
+            "domain": "CLAIMS_RISK",
+            "entity_type": "MEASURE",
+        }
+        field_a2 = {
+            "field_id": "col_t2_amount",
+            "name": "Claim Amount",
+            "expression": "SUM(Amount)",
+            "domain": "CLAIMS_RISK",
+            "entity_type": "MEASURE",
+        }
+        field_b = {
+            "field_id": "col_t3_premium",
+            "name": "Written Premium",
+            "expression": "SUM(Premium)",
+            "domain": "UNDERWRITING",
+            "entity_type": "MEASURE",
+        }
+
+        gov_service.extract_canonical_metadata_fields = MagicMock(return_value=[field_a1, field_a2, field_b])
+
+        mock_matcher = MagicMock()
+        discover_calls = []
+
+        def mock_discover(metadata_field, domain, force_fallback=False, **kwargs):
+            discover_calls.append(metadata_field["name"])
+            return {
+                "input_fingerprint": f"fp_{metadata_field['name']}",
+                "matching_engine": "2.2.0-azure-llama",
+                "primary_engine": "LLM_INFERENCE",
+                "fallback_used": False,
+                "candidate_count": 1,
+                "llm_attempted": True,
+                "llm_success": True,
+                "llm_latency_ms": 120.0,
+                "top_candidates": [{
+                    "kpi_id": "kpi_target",
+                    "confidence_code": "HIGH",
+                    "confidence_score": 0.9,
+                    "fallback_used": False,
+                    "decision_source": "LLM_INFERENCE",
+                }],
+            }
+
+        mock_matcher.discover_and_rank_candidates.side_effect = mock_discover
+        gov_service.matcher = mock_matcher
+
+        res = gov_service.run_mapping_pipeline(self.tenant_id, force_fallback=False)
+
+        # 3 fields total, but field_a2 should be cached from field_a1!
+        self.assertEqual(res["total_fields"], 3)
+        self.assertEqual(res["llm_requests_attempted"], 2)  # Claim Amount called once, Written Premium called once
+        self.assertEqual(res["llm_cached_evaluations"], 1)  # Claim Amount second time hit cache!
+        self.assertEqual(res["llm_processed_count"], 3)    # All 3 received LLM evaluations
+        self.assertEqual(res["coverage_type"], "FULL_LLM")
+        self.assertFalse(res["budget_exhausted"])
+        self.assertEqual(len(discover_calls), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
