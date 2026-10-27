@@ -52,11 +52,13 @@ class HealthResponse(BaseModel):
     service: str = "kpi-intelligence-api"
     version: str = "1.0.0"
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    storage: Optional[Dict[str, Any]] = None
 
 
 class ReadyResponse(BaseModel):
     status: str = "ready"
     timestamp: str = Field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    storage: Optional[Dict[str, Any]] = None
 
 
 class DomainCorrectionRequest(BaseModel):
@@ -216,6 +218,31 @@ def get_domain_metrics(
             "unmapped": unmapped,
             "fields": domain_fields,
         },
+    }
+
+
+@router.get("/storage/diagnostics")
+def get_storage_diagnostics(
+    deep: bool = Query(default=False),
+    deps: AppDependencies = Depends(get_dependencies),
+):
+    """
+    Returns non-destructive diagnostics for the active storage backend.
+    For SQLite: runs non-destructive PRAGMA quick_check (or PRAGMA integrity_check if deep=True).
+    Never executes migrations, schema alterations, or write operations.
+    """
+    repo = deps.governance_service.repo
+    if hasattr(repo, "check_integrity"):
+        diag = repo.check_integrity(deep=deep)
+        return {
+            "success": True,
+            "backend": "sqlite",
+            "diagnostics": diag,
+        }
+    return {
+        "success": True,
+        "backend": "cosmos",
+        "diagnostics": {"status": "managed_cloud_backend", "healthy": True},
     }
 
 
@@ -621,9 +648,21 @@ async def upload_files(
     )
 
     if result.get("status") == "FAILED":
+        is_corrupt = (
+            result.get("error_code") == "STORAGE_CORRUPTED"
+            or "malformed" in (result.get("error_message") or "").lower()
+            or "corrupt" in (result.get("error_message") or "").lower()
+        )
+        status_code = status.HTTP_503_SERVICE_UNAVAILABLE if is_corrupt else status.HTTP_400_BAD_REQUEST
         return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"success": False, "error": result.get("error_message"), "data": result},
+            status_code=status_code,
+            content={
+                "success": False,
+                "error": result.get("error_message"),
+                "error_code": "STORAGE_CORRUPTED" if is_corrupt else "INGESTION_FAILED",
+                "remediation": "Refer to docs/SQLITE_RECOVERY_RUNBOOK.md for SQLite non-destructive recovery steps." if is_corrupt else None,
+                "data": result,
+            },
         )
 
     return {"success": True, "data": result}
@@ -662,9 +701,21 @@ async def upload_folder(
     )
 
     if result.get("status") == "FAILED":
+        is_corrupt = (
+            result.get("error_code") == "STORAGE_CORRUPTED"
+            or "malformed" in (result.get("error_message") or "").lower()
+            or "corrupt" in (result.get("error_message") or "").lower()
+        )
+        status_code = status.HTTP_503_SERVICE_UNAVAILABLE if is_corrupt else status.HTTP_400_BAD_REQUEST
         return JSONResponse(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            content={"success": False, "error": result.get("error_message"), "data": result},
+            status_code=status_code,
+            content={
+                "success": False,
+                "error": result.get("error_message"),
+                "error_code": "STORAGE_CORRUPTED" if is_corrupt else "INGESTION_FAILED",
+                "remediation": "Refer to docs/SQLITE_RECOVERY_RUNBOOK.md for SQLite non-destructive recovery steps." if is_corrupt else None,
+                "data": result,
+            },
         )
 
     return {"success": True, "data": result}
@@ -757,6 +808,8 @@ def create_app(
         )
 
     from fastapi.exceptions import RequestValidationError
+    import sqlite3
+    from backend.storage.sqlite.repository import StorageCorruptionError
 
     @app.exception_handler(RequestValidationError)
     def validation_exception_handler(request: Request, exc: RequestValidationError):
@@ -765,14 +818,59 @@ def create_app(
             content={"success": False, "error": str(exc)},
         )
 
+    @app.exception_handler(StorageCorruptionError)
+    def storage_corruption_handler(request: Request, exc: StorageCorruptionError):
+        logger.critical("StorageCorruptionError caught at API boundary on '%s': %s", exc.db_path, exc, exc_info=True)
+        return JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={
+                "success": False,
+                "error": str(exc),
+                "error_code": "STORAGE_CORRUPTED",
+                "db_path": exc.db_path,
+                "remediation": "Refer to docs/SQLITE_RECOVERY_RUNBOOK.md for non-destructive SQLite recovery procedures.",
+            },
+        )
+
+    @app.exception_handler(sqlite3.DatabaseError)
+    def sqlite_database_error_handler(request: Request, exc: sqlite3.DatabaseError):
+        logger.critical("sqlite3.DatabaseError caught at API boundary: %s", exc, exc_info=True)
+        err_msg = str(exc)
+        is_corrupt = "malformed" in err_msg.lower() or "corrupt" in err_msg.lower()
+        status_code = status.HTTP_503_SERVICE_UNAVAILABLE if is_corrupt else status.HTTP_500_INTERNAL_SERVER_ERROR
+        return JSONResponse(
+            status_code=status_code,
+            content={
+                "success": False,
+                "error": f"Database storage error: {err_msg}",
+                "error_code": "STORAGE_CORRUPTED" if is_corrupt else "DATABASE_ERROR",
+                "remediation": "Refer to docs/SQLITE_RECOVERY_RUNBOOK.md for non-destructive recovery steps if database disk image is malformed." if is_corrupt else None,
+            },
+        )
+
     # Health & Readiness Endpoints
     @app.get("/health", response_model=HealthResponse, tags=["Diagnostics"])
     def health_check():
         return HealthResponse()
 
     @app.get("/ready", response_model=ReadyResponse, tags=["Diagnostics"])
-    def ready_check():
-        return ReadyResponse()
+    def ready_check(deps: AppDependencies = Depends(get_dependencies)):
+        repo = deps.governance_service.repo
+        storage_diag = {"backend": "unknown", "healthy": True}
+        if hasattr(repo, "check_integrity"):
+            storage_diag = repo.check_integrity(deep=False)
+            if not storage_diag.get("healthy", True):
+                return JSONResponse(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    content={
+                        "status": "not_ready",
+                        "error": "Storage subsystem corrupted: database disk image is malformed.",
+                        "error_code": "STORAGE_CORRUPTED",
+                        "storage": storage_diag,
+                        "remediation": "Refer to docs/SQLITE_RECOVERY_RUNBOOK.md for non-destructive recovery steps.",
+                    },
+                )
+        return ReadyResponse(storage=storage_diag)
 
     # Mount API Router
     app.include_router(router)

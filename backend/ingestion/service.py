@@ -14,8 +14,7 @@ from datetime import datetime
 
 from backend.connectors.base import PlatformType, BaseConnector, Diagnostic, DiagnosticSeverity
 from backend.connectors.registry import ConnectorRegistry
-from backend.connectors.powerbi.connector import PowerBIConnector
-from backend.connectors.powerbi.discovery import PbipDiscovery
+import backend.connectors.powerbi.connector
 from backend.ingestion.models import CanonicalIngestionBundle
 from backend.ingestion.converter import BundleToDocumentsConverter
 from backend.repository.interfaces import IRepository
@@ -79,6 +78,7 @@ class IngestionService:
             raise RuntimeError(f"Fatal extraction error: {first_fatal.message}")
 
         # 2. Project Structure Discovery
+        from backend.connectors.powerbi.discovery import PbipDiscovery
         proj_struct = PbipDiscovery.discover(source_path)
 
         # 3. Canonical Normalization

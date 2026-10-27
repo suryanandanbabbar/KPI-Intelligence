@@ -8,7 +8,6 @@ and strips trailing commas in objects and arrays before standard JSON decoding.
 
 import json
 from typing import Any, Union
-from backend.ingestion.paths import safe_open
 
 
 def strip_jsonc_comments_and_trailing_commas(text: str) -> str:
@@ -132,6 +131,7 @@ def parse_jsonc_file(filepath: str, encoding: str = "utf-8") -> Any:
     Reads and parses a JSONC file from disk.
     Handles UTF-8 BOM if present and supports Windows extended-length paths.
     """
+    from backend.ingestion.paths import safe_open
     with safe_open(filepath, "r", encoding=encoding, errors="replace") as f:
         content = f.read()
     if content.startswith("\ufeff"):

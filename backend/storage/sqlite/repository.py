@@ -12,6 +12,8 @@ import sqlite3
 import hashlib
 import uuid
 import re
+import logging
+from contextlib import contextmanager
 from typing import Dict, List, Optional, Any, Tuple
 from datetime import datetime, timezone
 
@@ -25,6 +27,19 @@ from backend.repository.interfaces import (
     RepositoryError,
 )
 from backend.repository.context import TenantContext, TenantAccessDeniedError
+
+logger = logging.getLogger("kpi_intel.storage.sqlite")
+
+
+class StorageCorruptionError(RepositoryError):
+    """
+    Raised when the local SQLite database file is detected as corrupted or malformed.
+    Halts execution safely without altering, resetting, or deleting the database file.
+    """
+    def __init__(self, message: str, db_path: str, details: Optional[List[str]] = None):
+        super().__init__(message)
+        self.db_path = db_path
+        self.details = details or []
 
 TENANT_SCOPED_CONTAINERS = {
     CosmosContainer.METADATA_CATALOG,
@@ -77,26 +92,155 @@ class SQLiteRepository(IRepository):
     and ETag concurrency control.
     """
 
-    def __init__(self, db_path: str = "local_data/kpi_intelligence.sqlite3"):
-        self.db_path = db_path
+    def __init__(
+        self,
+        db_path: str = "local_data/kpi_intelligence.sqlite3",
+        journal_mode: str = "WAL",
+    ):
+        self.db_path = db_path if db_path == ":memory:" else os.path.abspath(db_path)
+        self.journal_mode = journal_mode.upper() if journal_mode else "WAL"
         self._ensure_db_initialized()
 
-    def _get_connection(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(self.db_path, timeout=15.0, check_same_thread=False)
+    @contextmanager
+    def _get_connection(self, read_only: bool = False):
+        """
+        Yields an open SQLite connection with guaranteed closure in finally block.
+        Catches disk image malformed errors and raises StorageCorruptionError.
+        """
+        is_file = self.db_path != ":memory:" and os.path.exists(self.db_path)
+        uri = f"file:{self.db_path}?mode=ro" if (read_only and is_file) else self.db_path
+        conn = sqlite3.connect(
+            uri,
+            timeout=20.0,
+            check_same_thread=False,
+            uri=bool(read_only and is_file),
+        )
         conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA journal_mode = WAL;")
-        conn.execute("PRAGMA foreign_keys = ON;")
-        return conn
+        try:
+            if not read_only:
+                conn.execute("PRAGMA foreign_keys = ON;")
+            with conn:
+                yield conn
+        except sqlite3.DatabaseError as db_err:
+            err_msg = str(db_err).lower()
+            if "malformed" in err_msg or "corrupt" in err_msg:
+                logger.critical(
+                    "SQLite database corruption detected at '%s': %s",
+                    self.db_path,
+                    db_err,
+                    exc_info=True,
+                )
+                raise StorageCorruptionError(
+                    f"Local SQLite database at '{self.db_path}' is corrupted ({db_err}). "
+                    "The application has halted operations to preserve existing data. "
+                    "Refer to docs/SQLITE_RECOVERY_RUNBOOK.md for non-destructive recovery steps.",
+                    db_path=self.db_path,
+                    details=[str(db_err)],
+                ) from db_err
+            raise
+        finally:
+            conn.close()
+
+    def check_integrity(self, deep: bool = False) -> Dict[str, Any]:
+        """
+        Executes a non-destructive SQLite integrity diagnostic (PRAGMA quick_check or PRAGMA integrity_check).
+        Opens the database file in read-only mode to prevent side effects.
+        Never executes schema migrations or writes during integrity checks.
+        """
+        if self.db_path == ":memory:":
+            return {
+                "status": "healthy",
+                "healthy": True,
+                "db_path": self.db_path,
+                "file_exists": False,
+                "file_size_bytes": 0,
+                "diagnostic": "PRAGMA quick_check;",
+                "messages": ["In-memory database."],
+            }
+
+        if not os.path.exists(self.db_path):
+            return {
+                "status": "uninitialized",
+                "healthy": True,
+                "db_path": self.db_path,
+                "file_exists": False,
+                "file_size_bytes": 0,
+                "diagnostic": "PRAGMA quick_check;",
+                "messages": ["Database file does not exist yet."],
+            }
+
+        file_size = os.path.getsize(self.db_path)
+        pragma_cmd = "PRAGMA integrity_check;" if deep else "PRAGMA quick_check;"
+
+        try:
+            conn = sqlite3.connect(f"file:{self.db_path}?mode=ro", uri=True, timeout=10.0)
+            try:
+                cur = conn.cursor()
+                cur.execute(pragma_cmd)
+                rows = cur.fetchall()
+                messages = [str(r[0]) for r in rows] if rows else ["empty"]
+                is_ok = len(messages) == 1 and messages[0].strip().lower() == "ok"
+                return {
+                    "status": "healthy" if is_ok else "corrupted",
+                    "healthy": is_ok,
+                    "db_path": self.db_path,
+                    "file_exists": True,
+                    "file_size_bytes": file_size,
+                    "diagnostic": pragma_cmd,
+                    "messages": messages,
+                }
+            finally:
+                conn.close()
+        except sqlite3.DatabaseError as ex:
+            logger.error("SQLite integrity check failed on '%s': %s", self.db_path, ex)
+            return {
+                "status": "corrupted",
+                "healthy": False,
+                "db_path": self.db_path,
+                "file_exists": True,
+                "file_size_bytes": file_size,
+                "diagnostic": pragma_cmd,
+                "error": str(ex),
+                "messages": [str(ex)],
+            }
+        except Exception as ex:
+            return {
+                "status": "error",
+                "healthy": False,
+                "db_path": self.db_path,
+                "file_exists": True,
+                "file_size_bytes": file_size,
+                "diagnostic": pragma_cmd,
+                "error": str(ex),
+                "messages": [str(ex)],
+            }
 
     def _ensure_db_initialized(self) -> None:
-        """Creates directory and schema if not present."""
-        dir_name = os.path.dirname(self.db_path)
-        if dir_name and not os.path.exists(dir_name):
-            os.makedirs(dir_name, exist_ok=True)
+        """
+        Validates database integrity and initializes directory and schema if healthy.
+        If corruption is detected, raises StorageCorruptionError immediately without altering the database.
+        """
+        if self.db_path != ":memory:":
+            dir_name = os.path.dirname(self.db_path)
+            if dir_name and not os.path.exists(dir_name):
+                os.makedirs(dir_name, exist_ok=True)
+
+            # Check existing database file non-destructively
+            if os.path.exists(self.db_path) and os.path.getsize(self.db_path) > 0:
+                diag = self.check_integrity(deep=False)
+                if not diag["healthy"]:
+                    details_str = "; ".join(diag.get("messages", []))
+                    raise StorageCorruptionError(
+                        f"Local SQLite database at '{self.db_path}' is corrupted ({details_str}). "
+                        "The application has halted startup without modifying the database to protect existing data. "
+                        "Consult docs/SQLITE_RECOVERY_RUNBOOK.md for recovery steps or set KPI_SQLITE_PATH to a healthy path.",
+                        db_path=self.db_path,
+                        details=diag.get("messages", []),
+                    )
 
         with self._get_connection() as conn:
+            conn.execute(f"PRAGMA journal_mode = {self.journal_mode};")
             conn.executescript(SCHEMA_SQL)
-            conn.commit()
 
     def reset_database(self) -> None:
         """Clears all records from the local SQLite database."""
@@ -433,19 +577,44 @@ class SQLiteRepository(IRepository):
         return PagedResult(items=items, continuation_token=next_token, request_charge=1.0)
 
     def health_check(self) -> Dict[str, Any]:
-        with self._get_connection() as conn:
-            cur = conn.execute("SELECT COUNT(*) AS total_docs FROM cosmos_documents;")
-            total_docs = cur.fetchone()["total_docs"]
+        """Performs non-destructive health and integrity diagnostic."""
+        diag = self.check_integrity(deep=False)
+        if not diag["healthy"]:
+            return {
+                "status": "CORRUPTED",
+                "healthy": False,
+                "backend": "sqlite",
+                "db_path": self.db_path,
+                "diagnostic_error": diag.get("error") or "; ".join(diag.get("messages", [])),
+                "details": diag,
+            }
 
-            cur = conn.execute(
-                "SELECT container_name, COUNT(*) AS cnt FROM cosmos_documents GROUP BY container_name;"
-            )
-            container_counts = {r["container_name"]: r["cnt"] for r in cur.fetchall()}
+        try:
+            with self._get_connection(read_only=True) as conn:
+                cur = conn.execute("SELECT COUNT(*) AS total_docs FROM cosmos_documents;")
+                total_docs = cur.fetchone()["total_docs"]
 
-        return {
-            "status": "HEALTHY",
-            "backend": "sqlite",
-            "db_path": self.db_path,
-            "total_documents": total_docs,
-            "containers": container_counts,
-        }
+                cur = conn.execute(
+                    "SELECT container_name, COUNT(*) AS cnt FROM cosmos_documents GROUP BY container_name;"
+                )
+                container_counts = {r["container_name"]: r["cnt"] for r in cur.fetchall()}
+
+            return {
+                "status": "HEALTHY",
+                "healthy": True,
+                "backend": "sqlite",
+                "db_path": self.db_path,
+                "journal_mode": self.journal_mode,
+                "total_documents": total_docs,
+                "containers": container_counts,
+                "diagnostic": diag,
+            }
+        except Exception as ex:
+            return {
+                "status": "UNHEALTHY",
+                "healthy": False,
+                "backend": "sqlite",
+                "db_path": self.db_path,
+                "error": str(ex),
+                "diagnostic": diag,
+            }

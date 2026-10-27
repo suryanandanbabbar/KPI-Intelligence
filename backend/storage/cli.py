@@ -125,12 +125,18 @@ def validate_db(db_path: str, mode: str = "all") -> bool:
     if mode in ("cosmos", "all"):
         print("\n--- 2. COSMOS STORE VALIDATION ---")
         if os.path.exists(db_path):
-            repo = SQLiteRepository(db_path)
-            repo._ensure_db_initialized()
-            with repo._get_connection() as conn:
-                cur = conn.execute("SELECT COUNT(*) AS total FROM cosmos_documents;")
-                cnt = cur.fetchone()["total"]
-                print(f" [PASS] Table 'cosmos_documents' is accessible (current count: {cnt} docs).")
+            try:
+                repo = SQLiteRepository(db_path)
+                diag = repo.check_integrity(deep=True)
+                if not diag["healthy"]:
+                    print(f" [FAIL] SQLite database integrity check failed: {diag.get('messages')}")
+                    overall_pass = False
+                else:
+                    cnt = repo.inspect_counts()["total_documents"]
+                    print(f" [PASS] Table 'cosmos_documents' is healthy (integrity: OK, count: {cnt} docs).")
+            except Exception as ex:
+                print(f" [FAIL] SQLite database inspection failed: {ex}")
+                overall_pass = False
         else:
             print(" [FAIL] SQLite database does not exist.")
             overall_pass = False

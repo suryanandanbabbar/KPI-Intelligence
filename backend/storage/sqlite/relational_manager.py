@@ -29,11 +29,11 @@ SCHEMA_SQL_PATH = os.path.join(
 
 
 def get_db_path(custom_path: Optional[str] = None) -> str:
-    """Resolves local SQLite database path."""
+    """Resolves local SQLite database path as an absolute path."""
     if custom_path:
-        return custom_path
+        return os.path.abspath(custom_path)
     config = StorageConfig.from_env()
-    return config.sqlite_path
+    return os.path.abspath(config.sqlite_path)
 
 
 def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:

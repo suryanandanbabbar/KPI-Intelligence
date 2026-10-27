@@ -41,6 +41,7 @@ class StorageConfig:
 
     # SQLite Settings
     sqlite_path: str = "local_data/kpi_intelligence.sqlite3"
+    sqlite_journal_mode: str = "WAL"
 
     @classmethod
     def from_env(cls) -> "StorageConfig":
@@ -94,7 +95,11 @@ class StorageConfig:
                     "Either COSMOS_USE_MANAGED_IDENTITY=true (default) or COSMOS_KEY must be provided for Cosmos DB."
                 )
 
-        sqlite_path = os.getenv("KPI_SQLITE_PATH", "local_data/kpi_intelligence.sqlite3")
+        raw_sqlite_path = os.getenv("KPI_SQLITE_PATH", "local_data/kpi_intelligence.sqlite3").strip()
+        abs_sqlite_path = raw_sqlite_path if raw_sqlite_path == ":memory:" else os.path.abspath(raw_sqlite_path)
+        journal_mode = os.getenv("KPI_SQLITE_JOURNAL_MODE", "WAL").strip().upper()
+        if journal_mode not in ("WAL", "DELETE", "TRUNCATE", "MEMORY", "OFF"):
+            journal_mode = "WAL"
 
         return cls(
             backend=backend_type,
@@ -103,5 +108,18 @@ class StorageConfig:
             cosmos_database=database,
             cosmos_key=key,
             use_managed_identity=use_mi,
-            sqlite_path=sqlite_path,
+            sqlite_path=abs_sqlite_path,
+            sqlite_journal_mode=journal_mode,
         )
+
+    def to_safe_dict(self) -> dict:
+        """Returns non-sensitive metadata for diagnostics and logging."""
+        return {
+            "backend": self.backend.value,
+            "environment": self.environment.value,
+            "sqlite_path": self.sqlite_path,
+            "sqlite_journal_mode": self.sqlite_journal_mode,
+            "has_cosmos_endpoint": bool(self.cosmos_endpoint),
+            "cosmos_database": self.cosmos_database,
+            "use_managed_identity": self.use_managed_identity,
+        }

@@ -60,6 +60,7 @@ class IngestionJobRecord:
     asset_name: Optional[str] = None
     asset_version_id: Optional[str] = None
     error_message: Optional[str] = None
+    error_code: Optional[str] = None
     diagnostics: List[Dict[str, Any]] = field(default_factory=list)
     stats: Dict[str, Any] = field(default_factory=dict)
 
@@ -77,6 +78,7 @@ class IngestionJobRecord:
             "asset_name": self.asset_name,
             "asset_version_id": self.asset_version_id,
             "error_message": self.error_message,
+            "error_code": self.error_code,
             "diagnostics": self.diagnostics,
             "stats": self.stats,
         }
@@ -289,7 +291,22 @@ class IngestionManager:
             err_str = str(ex)
             win_err = getattr(ex, "winerror", None)
             err_no = getattr(ex, "errno", None)
-            if win_err == 206 or err_no == 36 or "too long" in err_str.lower() or "WinError 206" in err_str:
+            is_corrupt = "malformed" in err_str.lower() or "corrupt" in err_str.lower()
+
+            if is_corrupt:
+                job.error_code = "STORAGE_CORRUPTED"
+                job.error_message = (
+                    f"Storage failure during ingestion: Local database disk image is malformed or corrupted ({err_str}). "
+                    "The application has halted operations to prevent data loss. "
+                    "Consult docs/SQLITE_RECOVERY_RUNBOOK.md for non-destructive recovery steps."
+                )
+                if not any(d.get("code") == "STORAGE_CORRUPTED" for d in job.diagnostics):
+                    job.diagnostics.append({
+                        "code": "STORAGE_CORRUPTED",
+                        "error": err_str,
+                        "remediation": "Stop backend, back up database + sidecars, and execute recovery steps from docs/SQLITE_RECOVERY_RUNBOOK.md."
+                    })
+            elif win_err == 206 or err_no == 36 or "too long" in err_str.lower() or "WinError 206" in err_str:
                 job.error_message = (
                     f"Filesystem path length limit exceeded during ingestion: {err_str}. "
                     "Configure a shorter temporary workspace path via the KPI_TEMP_DIR environment variable (e.g. C:\\kpi_tmp)."

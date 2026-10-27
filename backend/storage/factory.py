@@ -37,8 +37,12 @@ def get_repository(config: Optional[StorageConfig] = None) -> IRepository:
         return CosmosRepository(config)
 
     elif config.backend == StorageBackendType.SQLITE:
-        logger.info("Initializing local SQLite test repository at: %s", config.sqlite_path)
-        return SQLiteRepository(config.sqlite_path)
+        logger.info(
+            "Initializing local SQLite repository at: %s (journal_mode=%s)",
+            config.sqlite_path,
+            config.sqlite_journal_mode,
+        )
+        return SQLiteRepository(db_path=config.sqlite_path, journal_mode=config.sqlite_journal_mode)
 
     else:
         raise ValueError(f"Unsupported storage backend: '{config.backend}'")
