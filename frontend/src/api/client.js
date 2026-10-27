@@ -17,6 +17,10 @@ class ApiError extends Error {
 async function request(endpoint, options = {}, tenantId) {
   const url = `${API_BASE}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
   const isFormData = options.body instanceof FormData;
+  const timeoutMs = options.timeoutMs || 45000;
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+
   const headers = {
     ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
     ...(tenantId ? { 'X-Tenant-ID': tenantId } : {}),
@@ -26,6 +30,7 @@ async function request(endpoint, options = {}, tenantId) {
   const config = {
     ...options,
     headers,
+    signal: options.signal || controller.signal,
   };
 
   if (config.body && typeof config.body === 'object' && !isFormData) {
@@ -34,6 +39,7 @@ async function request(endpoint, options = {}, tenantId) {
 
   try {
     const response = await fetch(url, config);
+    clearTimeout(timer);
     const contentType = response.headers.get('content-type') || '';
     let data;
 
@@ -50,8 +56,12 @@ async function request(endpoint, options = {}, tenantId) {
 
     return data;
   } catch (err) {
+    clearTimeout(timer);
     if (err instanceof ApiError) {
       throw err;
+    }
+    if (err.name === 'AbortError') {
+      throw new ApiError(`Request to ${endpoint} timed out after ${Math.round(timeoutMs / 1000)}s`, 408, null);
     }
     throw new ApiError(err.message || 'Network request failed', 0, null);
   }
@@ -115,6 +125,7 @@ export const api = {
         user_id: options.userId || 'analyst',
         force_fallback: Boolean(options.forceFallback),
       },
+      timeoutMs: 120000,
     }, tenantId);
   },
 

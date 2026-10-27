@@ -17,12 +17,29 @@ const VIEWS = [
   { id: 'audit', label: 'Audit History', icon: '📜', section: 'CATALOGUE & AUDIT' },
 ];
 
+const DOMAIN_ICONS = {
+  CLAIMS_RISK: '🛡️',
+  LEGAL: '⚖️',
+  UNDERWRITING: '📑',
+  SALES_DISTRIBUTION: '📈',
+  ACTUARIAL: '🧮',
+  SERVICE_OPERATIONS: '⚙️',
+  GENERAL: '📁',
+};
+
 export default function App() {
   const [activeView, setActiveView] = useState('overview');
   const [tenantId, setTenantId] = useState(TENANTS[0].id);
   const [theme, setTheme] = useState('light');
   const [loading, setLoading] = useState(false);
   const [toasts, setToasts] = useState([]);
+
+  // Pipeline Lifecycle State: { status: 'idle' | 'processing' | 'succeeded' | 'failed', message: string, data: object | null }
+  const [pipelineState, setPipelineState] = useState({
+    status: 'idle',
+    message: '',
+    data: null,
+  });
 
   // Operational State
   const [summary, setSummary] = useState(null);
@@ -38,6 +55,7 @@ export default function App() {
 
   // Modals & Drawer State
   const [selectedCandidateData, setSelectedCandidateData] = useState(null);
+  const [activeCandidateTab, setActiveCandidateTab] = useState(0);
   const [drawerMode, setDrawerMode] = useState('technical'); // 'technical' | 'analyst'
   const [chooseKpiModal, setChooseKpiModal] = useState({ open: false, mappingId: null, fieldName: null, candidates: [] });
   const [addKpiModal, setAddKpiModal] = useState({ open: false, mappingId: null, defaultDomain: 'CLAIMS_RISK' });
@@ -115,25 +133,70 @@ export default function App() {
     document.body.className = `theme-${theme}`;
   }, [theme]);
 
+  // Keyboard navigation: Escape key closes active drawers and modals
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      if (e.key === 'Escape') {
+        setSelectedCandidateData(null);
+        setChooseKpiModal(prev => ({ ...prev, open: false }));
+        setAddKpiModal(prev => ({ ...prev, open: false }));
+        setIngestModalOpen(false);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, []);
+
   // ---------------------------------------------------------------------------
   // GOVERNANCE ACTIONS
   // ---------------------------------------------------------------------------
 
   const handleRunMapping = async (forceFallback = false) => {
+    if (pipelineState.status === 'processing') return;
+
     if (!metadataFields || metadataFields.length === 0) {
-      addToast('warning', 'No canonical metadata fields found. Please ingest a Power BI project (.pbip) first.');
+      addToast('warning', 'No canonical metadata fields found. Please ingest analytical sources first.');
       setIngestModalOpen(true);
       return;
     }
+
+    setPipelineState({
+      status: 'processing',
+      message: forceFallback
+        ? 'Executing deterministic candidate ranking across canonical domains...'
+        : 'Executing canonical metadata extraction, domain segregation, and candidate ranking...',
+      data: null,
+    });
     setLoading(true);
+
     try {
       const res = await api.runMappingPipeline({ forceFallback }, tenantId);
       if (res.success) {
-        addToast('success', `Pipeline completed: ${res.data.total_fields_processed} fields mapped, ${res.data.auto_reused_from_learning} reused.`);
+        const total = res.data.total_fields ?? res.data.total_fields_processed ?? 0;
+        const reused = res.data.auto_reused_overrides ?? res.data.auto_reused_from_learning ?? 0;
+        const llmCount = res.data.llm_processed_count ?? 0;
+        const fbCount = res.data.fallback_processed_count ?? 0;
+        const duration = res.data.duration_seconds ? ` in ${res.data.duration_seconds}s` : '';
+
+        const successMsg = `Mapping complete${duration}: ${total} fields evaluated (${llmCount} via LLM, ${fbCount} via deterministic fallback, ${reused} reused from learning).`;
+        setPipelineState({
+          status: 'succeeded',
+          message: successMsg,
+          data: res.data,
+        });
+        addToast('success', successMsg);
         await refreshAllData();
+      } else {
+        throw new Error(res.error || 'Mapping execution failed');
       }
     } catch (err) {
-      addToast('error', `Mapping run failed: ${err.message}`);
+      const errMsg = err.message || 'Mapping pipeline encountered an error.';
+      setPipelineState({
+        status: 'failed',
+        message: errMsg,
+        data: null,
+      });
+      addToast('error', `Mapping failed: ${errMsg}`);
     } finally {
       setLoading(false);
     }
@@ -165,11 +228,19 @@ export default function App() {
     }
   };
 
-  const handleInspectCandidates = async (fieldId) => {
+  const handleInspectCandidates = async (fieldId, mappingId = null) => {
     try {
+      const matchedField = metadataFields.find(f => f.field_id === fieldId);
+      const matchedProposal = reviewQueue.find(p => p.field_id === fieldId || p.mapping_id === mappingId);
+      const effectiveMappingId = mappingId || matchedProposal?.mapping_id || `map_${fieldId}`;
       const res = await api.getFieldCandidates(fieldId, tenantId);
       if (res.success) {
-        setSelectedCandidateData(res.data);
+        setSelectedCandidateData({
+          ...res.data,
+          mappingId: effectiveMappingId,
+          field: res.data.field || matchedField || { field_id: fieldId, name: fieldId, domain: 'GENERAL' },
+        });
+        setActiveCandidateTab(0);
       }
     } catch (err) {
       addToast('error', `Failed to retrieve candidates: ${err.message}`);
@@ -346,9 +417,9 @@ export default function App() {
             <button
               className="apple-button primary"
               onClick={() => handleRunMapping(false)}
-              disabled={loading}
+              disabled={pipelineState.status === 'processing'}
             >
-              <span>{loading ? '⏳ Processing...' : '⚡ Run Mapping Pipeline'}</span>
+              <span>{pipelineState.status === 'processing' ? '⏳ Processing...' : '⚡ Run Mapping Pipeline'}</span>
             </button>
           </div>
         </header>
@@ -371,6 +442,47 @@ export default function App() {
                 </button>
               </div>
 
+              {/* Pipeline Lifecycle Banner */}
+              {pipelineState.status !== 'idle' && (
+                <div className={`pipeline-status-banner ${pipelineState.status}`} role="status">
+                  <div className="pipeline-status-content">
+                    <span className="pipeline-status-icon">
+                      {pipelineState.status === 'processing' && '⏳'}
+                      {pipelineState.status === 'succeeded' && '✅'}
+                      {pipelineState.status === 'failed' && '⚠️'}
+                    </span>
+                    <div className="pipeline-status-text">
+                      <strong>
+                        {pipelineState.status === 'processing' && 'Pipeline Processing in Progress'}
+                        {pipelineState.status === 'succeeded' && 'Pipeline Execution Completed'}
+                        {pipelineState.status === 'failed' && 'Pipeline Execution Failed'}
+                      </strong>
+                      <p>{pipelineState.message}</p>
+                    </div>
+                  </div>
+                  <div className="pipeline-status-actions">
+                    {pipelineState.status === 'failed' && (
+                      <button
+                        className="apple-button secondary small"
+                        onClick={() => handleRunMapping(false)}
+                      >
+                        🔄 Retry Pipeline
+                      </button>
+                    )}
+                    {pipelineState.status !== 'processing' && (
+                      <button
+                        className="apple-button text-button small"
+                        onClick={() => setPipelineState({ status: 'idle', message: '', data: null })}
+                        aria-label="Dismiss status banner"
+                      >
+                        Dismiss
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* 1. Summary Metric Cards */}
               <div className="kpi-metrics-grid">
                 <div className="metric-card">
                   <div className="metric-header">
@@ -409,14 +521,63 @@ export default function App() {
                 </div>
               </div>
 
-              {/* Execution Pipeline Overview */}
+              {/* 2. Segregated Domain Distribution Metric Cards (Directly beneath summary cards) */}
+              <div className="apple-card" style={{ marginTop: '20px' }}>
+                <div className="apple-card-header">
+                  <div className="apple-card-title-group">
+                    <h3 className="apple-card-title">Segregated Domain Distribution</h3>
+                    <span className="apple-card-subtitle">
+                      Canonical analytical measures and tables partitioned across enterprise business domains
+                    </span>
+                  </div>
+                  <span className="domain-count-pill">{domains.length} Domains</span>
+                </div>
+                <div className="apple-card-body">
+                  <div className="kpi-metrics-grid domain-distribution-grid">
+                    {domains.map(dom => {
+                      const count = summary?.domain_distribution?.[dom.code] ?? 0;
+                      const total = summary?.total_canonical_entities || 1;
+                      const percentage = Math.round((count / total) * 100);
+                      return (
+                        <div
+                          key={dom.code}
+                          className="metric-card domain-metric-card"
+                          onClick={() => {
+                            setMetadataDomainFilter(dom.code);
+                            setActiveView('metadata');
+                          }}
+                          role="button"
+                          tabIndex={0}
+                          title={`Click to filter canonical fields in ${dom.name}`}
+                        >
+                          <div className="metric-header">
+                            <span className="domain-badge small">{dom.code}</span>
+                            <span className="metric-icon">{DOMAIN_ICONS[dom.code] || '📁'}</span>
+                          </div>
+                          <div className="domain-distribution-title">{dom.name}</div>
+                          <div className="metric-value">{count}</div>
+                          <div className="metric-subtext">
+                            {count === 1 ? '1 field' : `${count} fields`} ({percentage}% of total)
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+
+              {/* 3. Execution Pipeline Overview (Following Domain Distribution) */}
               <div className="apple-card" style={{ marginTop: '20px' }}>
                 <div className="apple-card-header">
                   <div className="apple-card-title-group">
                     <h3 className="apple-card-title">Intelligent Governance Pipeline</h3>
                     <span className="apple-card-subtitle">End-to-end extraction, domain segregation, LLM semantic ranking, and human sign-off</span>
                   </div>
-                  <button className="apple-button secondary" onClick={() => handleRunMapping(true)}>
+                  <button
+                    className="apple-button secondary"
+                    onClick={() => handleRunMapping(true)}
+                    disabled={pipelineState.status === 'processing'}
+                  >
                     <span>Run Fallback Engine Only</span>
                   </button>
                 </div>
@@ -457,27 +618,6 @@ export default function App() {
                         <span>Mandatory sign-off with permanent override learning.</span>
                       </div>
                     </div>
-                  </div>
-                </div>
-              </div>
-
-              {/* Domain Distribution */}
-              <div className="apple-card" style={{ marginTop: '20px' }}>
-                <div className="apple-card-header">
-                  <h3 className="apple-card-title">Segregated Domain Distribution</h3>
-                </div>
-                <div className="apple-card-body">
-                  <div className="domain-cards-row">
-                    {domains.map(dom => {
-                      const count = summary?.domain_distribution?.[dom.code] ?? 0;
-                      return (
-                        <div key={dom.code} className="domain-stat-pill">
-                          <span className="domain-badge">{dom.code}</span>
-                          <span className="domain-name">{dom.name}</span>
-                          <span className="domain-count">{count}</span>
-                        </div>
-                      );
-                    })}
                   </div>
                 </div>
               </div>
@@ -623,32 +763,154 @@ export default function App() {
           {/* VIEW 3: DOMAIN SEGREGATION */}
           {activeView === 'domains' && (
             <section className="view-panel active">
-              <div className="apple-card">
+              {/* Page Header with Consistent Action Group */}
+              <div className="page-intro-header">
+                <div className="page-intro-titles">
+                  <h2 className="page-intro-title">Domain Segregation</h2>
+                  <p className="page-intro-subtitle">
+                    Canonical model KPI mapping, domain classification, and human governance across segregated business domains.
+                  </p>
+                </div>
+                <div className="page-intro-actions">
+                  <div className="system-status-pill">
+                    <span className={`status-dot ${llmStatus?.llm_configured ? 'green' : 'orange'}`}></span>
+                    <span>
+                      {llmStatus?.llm_configured
+                        ? `Azure Llama (${llmStatus.llm_deployment_label || 'Configured'})`
+                        : 'Deterministic Fallback Active'}
+                    </span>
+                  </div>
+                  <button
+                    className="apple-button secondary"
+                    onClick={() => setIngestModalOpen(true)}
+                  >
+                    📥 Ingest Sources
+                  </button>
+                  <button
+                    className="apple-button primary"
+                    onClick={() => handleRunMapping(false)}
+                    disabled={pipelineState.status === 'processing'}
+                  >
+                    <span>{pipelineState.status === 'processing' ? '⏳ Processing...' : '⚡ Run Mapping Pipeline'}</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Pipeline Status Banner if Active */}
+              {pipelineState.status !== 'idle' && (
+                <div className={`pipeline-status-banner ${pipelineState.status}`} role="status">
+                  <div className="pipeline-status-content">
+                    <span className="pipeline-status-icon">
+                      {pipelineState.status === 'processing' && '⏳'}
+                      {pipelineState.status === 'succeeded' && '✅'}
+                      {pipelineState.status === 'failed' && '⚠️'}
+                    </span>
+                    <div className="pipeline-status-text">
+                      <strong>
+                        {pipelineState.status === 'processing' && 'Pipeline Processing in Progress'}
+                        {pipelineState.status === 'succeeded' && 'Pipeline Execution Completed'}
+                        {pipelineState.status === 'failed' && 'Pipeline Execution Failed'}
+                      </strong>
+                      <p>{pipelineState.message}</p>
+                    </div>
+                  </div>
+                  <div className="pipeline-status-actions">
+                    {pipelineState.status === 'failed' && (
+                      <button
+                        className="apple-button secondary small"
+                        onClick={() => handleRunMapping(false)}
+                      >
+                        🔄 Retry Pipeline
+                      </button>
+                    )}
+                    {pipelineState.status !== 'processing' && (
+                      <button
+                        className="apple-button text-button small"
+                        onClick={() => setPipelineState({ status: 'idle', message: '', data: null })}
+                        aria-label="Dismiss status banner"
+                      >
+                        Dismiss
+                      </button>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Canonical Segregated Business Domains Section */}
+              <div className="apple-card" style={{ marginTop: '20px' }}>
                 <div className="apple-card-header">
                   <div className="apple-card-title-group">
                     <h3 className="apple-card-title">Canonical Segregated Business Domains</h3>
                     <span className="apple-card-subtitle">
-                      Strict domain boundaries: Legal and Underwriting are strictly separated.
+                      Authoritative domain boundaries partitioned by regulatory, operational, and actuarial requirements.
                     </span>
                   </div>
+                  <span className="domain-count-pill">{domains.length} Domains</span>
                 </div>
                 <div className="apple-card-body">
-                  <div className="domain-grid">
-                    {domains.map(d => (
-                      <div key={d.code} className="domain-card-box">
-                        <div className="domain-card-top">
-                          <span className="domain-badge large">{d.code}</span>
-                          <span className="domain-entity-count">
-                            {summary?.domain_distribution?.[d.code] ?? 0} fields
-                          </span>
+                  <div className="domain-cards-grid">
+                    {domains.map(d => {
+                      const count = summary?.domain_distribution?.[d.code] ?? 0;
+                      const signals = (d.keywords && d.keywords.length > 0)
+                        ? d.keywords
+                        : (d.subtypes && d.subtypes.length > 0)
+                        ? d.subtypes
+                        : [];
+                      return (
+                        <div key={d.code} className="domain-dashboard-card" data-domain={d.code}>
+                          {/* 1. Header: Domain Name & Code Identifier */}
+                          <div className="domain-card-header-row">
+                            <div className="domain-card-title-group">
+                              <span className="domain-card-icon">{DOMAIN_ICONS[d.code] || '🛡️'}</span>
+                              <h4 className="domain-card-name">{d.name}</h4>
+                            </div>
+                            <span className="domain-badge">{d.code}</span>
+                          </div>
+
+                          {/* 2. Field-count metric */}
+                          <div className="domain-metric-row">
+                            <div className="domain-metric-value">{count}</div>
+                            <div className="domain-metric-label">
+                              {count === 1 ? 'Associated Canonical Field' : 'Associated Canonical Fields'}
+                            </div>
+                          </div>
+
+                          {/* 3. Business description */}
+                          <p className="domain-card-description">{d.description}</p>
+
+                          {/* 4. Key signals */}
+                          <div className="domain-signals-section">
+                            <span className="domain-signals-heading">Key Signals</span>
+                            {signals.length > 0 ? (
+                              <div className="domain-signals-chips">
+                                {signals.slice(0, 7).map((s, idx) => (
+                                  <span key={idx} className="signal-chip">{s}</span>
+                                ))}
+                                {signals.length > 7 && (
+                                  <span className="signal-chip-more">+{signals.length - 7} more</span>
+                                )}
+                              </div>
+                            ) : (
+                              <div className="domain-signals-empty">No key signals identified</div>
+                            )}
+                          </div>
+
+                          {/* 5. Classification or governance status */}
+                          <div className="domain-card-footer">
+                            <span className="domain-boundary-pill">Strict Domain Boundary</span>
+                            <button
+                              className="apple-button text-button small"
+                              onClick={() => {
+                                setMetadataDomainFilter(d.code);
+                                setActiveView('metadata');
+                              }}
+                            >
+                              View Fields →
+                            </button>
+                          </div>
                         </div>
-                        <h4 className="domain-title">{d.name}</h4>
-                        <p className="domain-desc">{d.description}</p>
-                        <div className="domain-subtypes">
-                          <strong>Key Signals:</strong> {d.subtypes?.join(', ') || 'N/A'}
-                        </div>
-                      </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 </div>
               </div>
@@ -824,7 +1086,7 @@ export default function App() {
                               </button>
                               <button
                                 className="link-action-btn"
-                                onClick={() => handleInspectCandidates(prop.field_id)}
+                                onClick={() => handleInspectCandidates(prop.field_id, mappingId)}
                               >
                                 Full Evidence Drawer
                               </button>
@@ -1021,85 +1283,323 @@ export default function App() {
       </main>
 
       {/* SLIDE-OVER EVIDENCE DRAWER */}
-      {selectedCandidateData && (
-        <div className="drawer-overlay" onClick={() => setSelectedCandidateData(null)}>
-          <div className="drawer-content" onClick={e => e.stopPropagation()}>
-            <div className="drawer-header">
-              <div>
-                <h3 className="drawer-title">{selectedCandidateData.field?.name}</h3>
-                <span className="code-hint">Domain: {selectedCandidateData.field?.domain}</span>
-              </div>
-              <button className="apple-button secondary small" onClick={() => setSelectedCandidateData(null)}>✕</button>
-            </div>
+      {selectedCandidateData && (() => {
+        const field = selectedCandidateData.field || {};
+        const candidates = selectedCandidateData.candidates || selectedCandidateData.top_candidates || [];
+        const activeIdx = Math.min(Math.max(0, activeCandidateTab), Math.max(0, candidates.length - 1));
+        const activeCandidate = candidates[activeIdx] || null;
+        const mappingId = selectedCandidateData.mappingId || `map_${field.field_id}`;
 
-            <div className="drawer-view-toggle">
-              <button
-                className={`toggle-tab ${drawerMode === 'technical' ? 'active' : ''}`}
-                onClick={() => setDrawerMode('technical')}
-              >
-                Technical Evidence
-              </button>
-              <button
-                className={`toggle-tab ${drawerMode === 'analyst' ? 'active' : ''}`}
-                onClick={() => setDrawerMode('analyst')}
-              >
-                Plain Analyst Summary
-              </button>
-            </div>
-
-            <div className="drawer-body">
-              {(selectedCandidateData.candidates || selectedCandidateData.top_candidates || []).map((c, idx) => (
-                <div key={c.kpi_id || idx} className="candidate-drawer-card">
-                  <div className="candidate-drawer-header">
-                    <span className="rank-pill">Candidate #{idx + 1}</span>
-                    <h4>{c.kpi_name}</h4>
-                    <span className={`confidence-badge ${c.confidence_code?.toLowerCase()}`}>
-                      {c.confidence_code} ({Math.round((c.confidence_score || 0) * 100)}%)
-                    </span>
+        return (
+          <div className="drawer-overlay" onClick={() => setSelectedCandidateData(null)}>
+            <div className="drawer-content apple-drawer" onClick={e => e.stopPropagation()} role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+              {/* 1. Drawer Header */}
+              <div className="drawer-header">
+                <div className="drawer-header-content">
+                  <span className="drawer-eyebrow">CANDIDATE EVIDENCE & ONTOLOGY ALIGNMENT</span>
+                  <h3 id="drawer-title" className="drawer-title">{field.name || field.display_name || 'Canonical Field'}</h3>
+                  <div className="drawer-header-tags">
+                    <span className="domain-badge">{field.domain || 'GENERAL'}</span>
+                    <span className="type-badge">{field.entity_type || field.data_type || 'MEASURE'}</span>
+                    {field.source_asset_id && <span className="source-asset-pill">{field.source_asset_id}</span>}
                   </div>
-
-                  {drawerMode === 'technical' ? (
-                    <div className="technical-evidence-block">
-                      <div className="evidence-field">
-                        <strong>Ranking Method:</strong> <code>{c.ranking_method}</code>
-                      </div>
-                      <div className="evidence-field">
-                        <strong>Observed Signals:</strong> {c.evidence?.observed_evidence?.join('; ') || 'None'}
-                      </div>
-                      <div className="evidence-field">
-                        <strong>Missing Info:</strong> {c.evidence?.missing_information?.join('; ') || 'None'}
-                      </div>
-                      <div className="evidence-field">
-                        <strong>Contradictions:</strong> {c.evidence?.contradictory_evidence?.join('; ') || 'None detected'}
-                      </div>
-                      <div className="evidence-field">
-                        <strong>Formula Compatibility:</strong> {c.evidence?.formula_compatibility || 'Compatible'}
-                      </div>
-                    </div>
-                  ) : (
-                    <div className="analyst-summary-block">
-                      <p><strong>Rationale:</strong> {c.evidence?.ranking_rationale || 'High semantic compatibility.'}</p>
-                      <p><strong>Inferences:</strong> {c.evidence?.inferences_made?.join('; ') || 'Direct term match.'}</p>
+                  {field.expression && (
+                    <div className="drawer-field-expression">
+                      <span className="expression-label">CANONICAL EXPRESSION</span>
+                      <code>{field.expression}</code>
                     </div>
                   )}
-
-                  <div className="candidate-drawer-actions">
-                    <button
-                      className="apple-button primary small"
-                      onClick={async () => {
-                        await handleApprove(`map_${selectedCandidateData.field.field_id}`, c.kpi_id);
-                        setSelectedCandidateData(null);
-                      }}
-                    >
-                      Approve This Candidate
-                    </button>
-                  </div>
                 </div>
-              ))}
+                <button
+                  className="drawer-close-btn"
+                  onClick={() => setSelectedCandidateData(null)}
+                  aria-label="Close candidate evidence drawer"
+                >
+                  ✕
+                </button>
+              </div>
+
+              {/* 2. Candidate Alternative Tabs (if multiple candidates) */}
+              {candidates.length > 1 && (
+                <div className="drawer-candidate-tabs" role="tablist" aria-label="Candidate matches">
+                  {candidates.map((cand, idx) => {
+                    const isSelected = idx === activeIdx;
+                    const isTop = idx === 0;
+                    return (
+                      <button
+                        key={cand.kpi_id || idx}
+                        role="tab"
+                        aria-selected={isSelected}
+                        className={`drawer-candidate-tab ${isSelected ? 'active' : ''}`}
+                        onClick={() => setActiveCandidateTab(idx)}
+                      >
+                        <span className="tab-rank">#{idx + 1}</span>
+                        <span className="tab-name">{cand.kpi_name}</span>
+                        {isTop && <span className="tab-rec-pill">Top Match</span>}
+                        <span className={`confidence-badge mini ${cand.confidence_code?.toLowerCase()}`}>
+                          {cand.confidence_code} {cand.confidence_score != null ? `${Math.round(cand.confidence_score * 100)}%` : ''}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* 3. Drawer Body */}
+              <div className="drawer-body">
+                {!activeCandidate ? (
+                  <div className="drawer-empty-state">
+                    <p>No candidate KPIs discovered for this canonical field.</p>
+                  </div>
+                ) : (
+                  <>
+                    {/* Section 1: Candidate Summary */}
+                    <div className="evidence-section-card">
+                      <div className="evidence-section-header">
+                        <span className="evidence-section-eyebrow">CANDIDATE SUMMARY</span>
+                        <h4 className="evidence-candidate-name">{activeCandidate.kpi_name}</h4>
+                        <div className="evidence-meta-row">
+                          <span className={`confidence-badge ${activeCandidate.confidence_code?.toLowerCase()}`}>
+                            {activeCandidate.confidence_code} ({Math.round((activeCandidate.confidence_score || 0) * 100)}%)
+                          </span>
+                          <span className="engine-pill">
+                            {activeCandidate.ranking_method || activeCandidate.matching_engine || activeCandidate.decision_source || 'DETERMINISTIC_FALLBACK'}
+                          </span>
+                          <span className="domain-badge">{activeCandidate.domain || field.domain}</span>
+                          <span className={`formula-status-pill ${(activeCandidate.structured_evidence?.contradictory_evidence?.some(c => c.toLowerCase().includes('formula')) || activeCandidate.contradicting_evidence?.some(c => c.toLowerCase().includes('formula'))) ? 'incompatible' : 'compatible'}`}>
+                            {(activeCandidate.structured_evidence?.contradictory_evidence?.some(c => c.toLowerCase().includes('formula')) || activeCandidate.contradicting_evidence?.some(c => c.toLowerCase().includes('formula'))) ? '⚠️ Formula Penalty' : '✓ Formula Compatible'}
+                          </span>
+                        </div>
+                      </div>
+                      <div className="evidence-section-body">
+                        <p className="evidence-definition-text">
+                          {activeCandidate.definition || 'Authoritative enterprise definition registered in the KPI Bank.'}
+                        </p>
+                        {activeCandidate.formula && (
+                          <div className="evidence-formula-callout">
+                            <span className="formula-tag">STANDARD FORMULA:</span>
+                            <code>{activeCandidate.formula}</code>
+                          </div>
+                        )}
+                        {activeCandidate.kpi_code && (
+                          <div className="evidence-code-row">
+                            <span className="code-label">Ontology Code:</span>
+                            <code>{activeCandidate.kpi_code}</code>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Section 2: Observed Signals */}
+                    <div className="evidence-section-card">
+                      <div className="evidence-section-header">
+                        <h5 className="evidence-card-title">Observed Signals</h5>
+                        <span className="evidence-card-subtitle">Direct syntactic, semantic, and domain matches confirming alignment</span>
+                      </div>
+                      <div className="evidence-section-body">
+                        {(() => {
+                          const signals = activeCandidate.structured_evidence?.observed_evidence
+                            || activeCandidate.supporting_evidence
+                            || activeCandidate.evidence?.observed_evidence
+                            || [];
+                          return signals.length > 0 ? (
+                            <div className="evidence-chips-grid">
+                              {signals.map((sig, i) => (
+                                <span key={i} className="evidence-chip positive">
+                                  <span className="chip-icon">✓</span>
+                                  <span className="chip-text">{sig}</span>
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="evidence-empty-text">No observed signals identified</p>
+                          );
+                        })()}
+                      </div>
+                    </div>
+
+                    {/* Section 3: Missing Information */}
+                    <div className="evidence-section-card">
+                      <div className="evidence-section-header">
+                        <h5 className="evidence-card-title">Missing Information</h5>
+                        <span className="evidence-card-subtitle">Attributes defined in the standard ontology not present in source metadata</span>
+                      </div>
+                      <div className="evidence-section-body">
+                        {(() => {
+                          const missing = activeCandidate.structured_evidence?.missing_information
+                            || activeCandidate.evidence?.missing_information
+                            || [];
+                          return missing.length > 0 ? (
+                            <ul className="evidence-bullet-list">
+                              {missing.map((item, i) => (
+                                <li key={i}>{item}</li>
+                              ))}
+                            </ul>
+                          ) : (
+                            <p className="evidence-empty-text">No missing information identified</p>
+                          );
+                        })()}
+                      </div>
+                    </div>
+
+                    {/* Section 4: Contradictions */}
+                    <div className="evidence-section-card">
+                      <div className="evidence-section-header">
+                        <h5 className="evidence-card-title">Contradictions & Disqualifications</h5>
+                        <span className="evidence-card-subtitle">Conflicting dimensions, mismatched domains, or inconsistent aggregations</span>
+                      </div>
+                      <div className="evidence-section-body">
+                        {(() => {
+                          const contradictions = activeCandidate.structured_evidence?.contradictory_evidence
+                            || activeCandidate.contradicting_evidence
+                            || activeCandidate.evidence?.contradictory_evidence
+                            || [];
+                          return contradictions.length > 0 ? (
+                            <div className="evidence-chips-grid">
+                              {contradictions.map((contra, i) => (
+                                <span key={i} className="evidence-chip warning">
+                                  <span className="chip-icon">⚠️</span>
+                                  <span className="chip-text">{contra}</span>
+                                </span>
+                              ))}
+                            </div>
+                          ) : (
+                            <p className="evidence-empty-text">No contradictions detected</p>
+                          );
+                        })()}
+                      </div>
+                    </div>
+
+                    {/* Section 5: Formula Compatibility & Field Overlap */}
+                    <div className="evidence-section-card">
+                      <div className="evidence-section-header">
+                        <h5 className="evidence-card-title">Formula Compatibility & Field Overlap</h5>
+                        <span className="evidence-card-subtitle">Aggregation constraints and required source operand dependencies</span>
+                      </div>
+                      <div className="evidence-section-body">
+                        <div className="formula-compat-grid">
+                          <div className="compat-item">
+                            <span className="compat-label">Aggregation Type</span>
+                            <span className="type-badge">{activeCandidate.aggregation_type || 'SUM'}</span>
+                          </div>
+                          <div className="compat-item">
+                            <span className="compat-label">Domain Alignment</span>
+                            <span className="domain-badge">{activeCandidate.domain || field.domain}</span>
+                          </div>
+                        </div>
+                        {activeCandidate.fields_required?.length > 0 && (
+                          <div className="required-fields-block">
+                            <span className="compat-sublabel">Ontology Required Operands:</span>
+                            <div className="fields-required-pills">
+                              {activeCandidate.fields_required.map((f, i) => (
+                                <span key={i} className="required-field-pill">{f}</span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                        {activeCandidate.structured_evidence?.inferences_made?.length > 0 && (
+                          <div className="inferences-block">
+                            <span className="compat-sublabel">Inferences Made:</span>
+                            <ul className="evidence-bullet-list compact">
+                              {activeCandidate.structured_evidence.inferences_made.map((inf, i) => (
+                                <li key={i}>{inf}</li>
+                              ))}
+                            </ul>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Section 6: Ranking Rationale & Score Decomposition */}
+                    <div className="evidence-section-card">
+                      <div className="evidence-section-header">
+                        <h5 className="evidence-card-title">Ranking Rationale & Score Decomposition</h5>
+                        <span className="evidence-card-subtitle">Component weighting according to the transparent deterministic scoring model</span>
+                      </div>
+                      <div className="evidence-section-body">
+                        <p className="rationale-text">
+                          {activeCandidate.ranking_rationale
+                            || activeCandidate.rationale
+                            || activeCandidate.evidence?.ranking_rationale
+                            || 'Multi-criteria matching score based on token Jaccard similarity, formula overlap, and domain boundaries.'}
+                        </p>
+                        <div className="score-breakdown-grid">
+                          <div className="score-metric-box">
+                            <span className="score-metric-label">Name Similarity (30%)</span>
+                            <span className="score-metric-value">{activeCandidate.name_score != null ? `${Math.round(activeCandidate.name_score * 100)}%` : '—'}</span>
+                          </div>
+                          <div className="score-metric-box">
+                            <span className="score-metric-label">Alias Match (20%)</span>
+                            <span className="score-metric-value">{activeCandidate.alias_score != null ? `${Math.round(activeCandidate.alias_score * 100)}%` : '—'}</span>
+                          </div>
+                          <div className="score-metric-box">
+                            <span className="score-metric-label">Formula Overlap (25%)</span>
+                            <span className="score-metric-value">{activeCandidate.formula_score != null ? `${Math.round(activeCandidate.formula_score * 100)}%` : '—'}</span>
+                          </div>
+                          <div className="score-metric-box">
+                            <span className="score-metric-label">Definition Jaccard (15%)</span>
+                            <span className="score-metric-value">{activeCandidate.definition_score != null ? `${Math.round(activeCandidate.definition_score * 100)}%` : '—'}</span>
+                          </div>
+                          <div className="score-metric-box">
+                            <span className="score-metric-label">Domain Affinity (10%)</span>
+                            <span className="score-metric-value">{activeCandidate.domain_score != null ? `${Math.round(activeCandidate.domain_score * 100)}%` : '—'}</span>
+                          </div>
+                          <div className="score-metric-box total">
+                            <span className="score-metric-label">Composite Score</span>
+                            <span className="score-metric-value">{activeCandidate.confidence_score != null ? `${Math.round(activeCandidate.confidence_score * 100)}%` : '—'}</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Section 7: Governance Action Card */}
+                    <div className="drawer-action-card">
+                      <div className="governance-rule-notice">
+                        <span className="notice-icon">⚖️</span>
+                        <span>
+                          <strong>Governance Rule:</strong> HIGH-confidence candidates require mandatory human approval prior to canonical locking.
+                        </span>
+                      </div>
+                      <div className="drawer-action-buttons">
+                        <button
+                          className="apple-button primary"
+                          onClick={async () => {
+                            await handleApprove(mappingId, activeCandidate.kpi_id);
+                            setSelectedCandidateData(null);
+                          }}
+                        >
+                          ✅ Approve Candidate for Canonical Locking
+                        </button>
+                        <button
+                          className="apple-button secondary"
+                          onClick={() => {
+                            const fName = field.name || field.field_id;
+                            setSelectedCandidateData(null);
+                            setChooseKpiModal({
+                              open: true,
+                              mappingId: mappingId,
+                              fieldName: fName,
+                              candidates: candidates,
+                            });
+                          }}
+                        >
+                          🔄 Choose Other KPI
+                        </button>
+                        <button
+                          className="apple-button text-button"
+                          onClick={() => setSelectedCandidateData(null)}
+                        >
+                          Close
+                        </button>
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* CHOOSE ALTERNATIVE KPI MODAL */}
       {chooseKpiModal.open && (

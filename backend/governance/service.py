@@ -233,6 +233,15 @@ class GovernanceService:
         2. Generates candidate rankings via LLM / deterministic fallback.
         3. Persists KpiCandidateDocument, KpiMappingDocument, and KpiMappingRunDocument.
         """
+        import time as _pytime
+        t0 = _pytime.time()
+        logger.info(
+            "Pipeline execution initiated: tenant=%s, user=%s, force_fallback=%s",
+            tenant_id,
+            user_id,
+            force_fallback,
+        )
+
         ctx = TenantContext(tenant_id=tenant_id)
         fields = self.extract_canonical_metadata_fields(tenant_id)
 
@@ -243,6 +252,8 @@ class GovernanceService:
         llm_processed_count = 0
         fallback_processed_count = 0
         mappings_produced: List[Dict[str, Any]] = []
+
+        logger.info("Loaded %d canonical metadata fields for tenant %s", total_fields, tenant_id)
 
         for field in fields:
             field_id = field["field_id"]
@@ -330,6 +341,7 @@ class GovernanceService:
             mappings_produced.append(mapping_doc.to_dict())
 
         completed_at = datetime.now(timezone.utc).isoformat()
+        duration = round(_pytime.time() - t0, 2)
 
         # 3. Persist Mapping Run Record
         run_doc = KpiMappingRunDocument(
@@ -345,15 +357,30 @@ class GovernanceService:
         )
         self.repo.upsert_item(CosmosContainer.KPI_GOVERNANCE, tenant_id, run_doc.to_dict(), ctx)
 
+        logger.info(
+            "Pipeline completed for tenant %s in %.2fs: %d fields processed (LLM: %d, Fallback: %d, Reused: %d)",
+            tenant_id,
+            duration,
+            total_fields,
+            llm_processed_count,
+            fallback_processed_count,
+            auto_reused_count,
+        )
+
         return {
             "mapping_run_id": run_id,
             "total_fields": total_fields,
+            "total_fields_processed": total_fields,
             "auto_reused_overrides": auto_reused_count,
+            "auto_reused_from_learning": auto_reused_count,
             "llm_processed_count": llm_processed_count,
             "fallback_processed_count": fallback_processed_count,
             "status": "COMPLETED",
+            "fallback_used": (fallback_processed_count > 0 or force_fallback),
+            "primary_engine": "LLM_INFERENCE" if llm_processed_count > 0 else "DETERMINISTIC_FALLBACK",
             "started_at": started_at,
             "completed_at": completed_at,
+            "duration_seconds": duration,
         }
 
     # =========================================================================
@@ -674,11 +701,11 @@ class GovernanceService:
         ctx = TenantContext(tenant_id=tenant_id)
         mapping_id = f"map_{field_id}"
         m_data = self.repo.get_item(CosmosContainer.KPI_GOVERNANCE, tenant_id, mapping_id, ctx)
+        fields = self.extract_canonical_metadata_fields(tenant_id)
+        target = next((f for f in fields if f["field_id"] == field_id), None)
 
         if not m_data:
             # Generate on demand if not yet mapped
-            fields = self.extract_canonical_metadata_fields(tenant_id)
-            target = next((f for f in fields if f["field_id"] == field_id), None)
             if not target:
                 raise ValueError(f"Field '{field_id}' not found in canonical metadata.")
 
@@ -686,6 +713,7 @@ class GovernanceService:
             return {
                 "field_id": field_id,
                 "mapping_id": mapping_id,
+                "field": target,
                 "mapping_status": "PROPOSED",
                 "top_candidates": res.get("top_candidates", []),
                 "matching_engine": res.get("matching_engine"),
@@ -695,6 +723,7 @@ class GovernanceService:
         return {
             "field_id": field_id,
             "mapping_id": mapping_id,
+            "field": target or {"field_id": field_id, "name": field_id, "domain": "GENERAL"},
             "mapping_status": m_data.get("mapping_status"),
             "selected_kpi_id": m_data.get("selected_ontology_entry_id"),
             "top_candidates": m_data.get("top_candidates", []),

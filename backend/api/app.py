@@ -333,14 +333,45 @@ def run_mapping_pipeline(
     deps: AppDependencies = Depends(get_dependencies),
 ):
     """Executes the mapping pipeline on all extracted canonical metadata fields."""
+    import time as _pytime
+    start_time = _pytime.time()
     user_id = payload.user_id if payload else "analyst"
     force_fallback = payload.force_fallback if payload else False
-    res = deps.governance_service.run_mapping_pipeline(
-        tenant_id=tenant_id,
-        user_id=user_id,
-        force_fallback=force_fallback,
+
+    logger.info(
+        "POST /api/v1/mapping/run initiated: tenant=%s, user=%s, force_fallback=%s",
+        tenant_id,
+        user_id,
+        force_fallback,
     )
-    return {"success": True, "data": res}
+    try:
+        res = deps.governance_service.run_mapping_pipeline(
+            tenant_id=tenant_id,
+            user_id=user_id,
+            force_fallback=force_fallback,
+        )
+        elapsed = round(_pytime.time() - start_time, 2)
+        logger.info(
+            "POST /api/v1/mapping/run completed in %.2fs: tenant=%s, total=%d, fallback_used=%s",
+            elapsed,
+            tenant_id,
+            res.get("total_fields", 0),
+            res.get("fallback_used", False),
+        )
+        return {"success": True, "data": res}
+    except Exception as ex:
+        elapsed = round(_pytime.time() - start_time, 2)
+        logger.error(
+            "POST /api/v1/mapping/run failed after %.2fs for tenant %s: %s",
+            elapsed,
+            tenant_id,
+            str(ex),
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=500,
+            detail=f"Mapping pipeline execution failed: {str(ex)}",
+        )
 
 
 @router.post("/mapping/approve")

@@ -187,6 +187,9 @@ class TestFastAPIBackend(unittest.TestCase):
         body_c = resp_c.json()
         self.assertTrue(body_c["success"])
         self.assertIn("top_candidates", body_c["data"])
+        self.assertIn("field", body_c["data"])
+        self.assertEqual(body_c["data"]["field"]["field_id"], field["field_id"])
+        self.assertIn("domain", body_c["data"]["field"])
 
     def test_domain_correction_persists(self):
         """POST /api/v1/metadata/fields/{field_id}/domain updates domain classification."""
@@ -210,7 +213,7 @@ class TestFastAPIBackend(unittest.TestCase):
     # -------------------------------------------------------------------------
 
     def test_run_mapping_pipeline_endpoint(self):
-        """POST /api/v1/mapping/run executes end-to-end pipeline."""
+        """POST /api/v1/mapping/run executes end-to-end pipeline and returns timing & dual-key metrics."""
         resp = self.client.post(
             "/api/v1/mapping/run",
             json={"force_fallback": True},
@@ -220,6 +223,9 @@ class TestFastAPIBackend(unittest.TestCase):
         body = resp.json()
         self.assertTrue(body["success"])
         self.assertGreater(body["data"]["total_fields"], 0)
+        self.assertEqual(body["data"]["total_fields"], body["data"]["total_fields_processed"])
+        self.assertIn("auto_reused_from_learning", body["data"])
+        self.assertIn("duration_seconds", body["data"])
 
     def test_approve_mapping_endpoint(self):
         """POST /api/v1/mapping/approve persists approval in repository."""
