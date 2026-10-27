@@ -33,12 +33,15 @@ export default function App() {
   const [kpiBankEntries, setKpiBankEntries] = useState([]);
   const [overrides, setOverrides] = useState([]);
   const [auditLogs, setAuditLogs] = useState([]);
+  const [ingestedSources, setIngestedSources] = useState([]);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // Modals & Drawer State
   const [selectedCandidateData, setSelectedCandidateData] = useState(null);
   const [drawerMode, setDrawerMode] = useState('technical'); // 'technical' | 'analyst'
   const [chooseKpiModal, setChooseKpiModal] = useState({ open: false, mappingId: null, fieldName: null, candidates: [] });
   const [addKpiModal, setAddKpiModal] = useState({ open: false, mappingId: null, defaultDomain: 'CLAIMS_RISK' });
+  const [ingestModalOpen, setIngestModalOpen] = useState(false);
 
   // Filters
   const [metadataDomainFilter, setMetadataDomainFilter] = useState('');
@@ -60,13 +63,14 @@ export default function App() {
   const refreshAllData = useCallback(async (currentTenant = tenantId) => {
     setLoading(true);
     try {
-      const [sumRes, domRes, fieldsRes, kpiRes, ovrRes, audRes] = await Promise.allSettled([
+      const [sumRes, domRes, fieldsRes, kpiRes, ovrRes, audRes, sourcesRes] = await Promise.allSettled([
         api.getWorkspaceSummary(currentTenant),
         api.getDomains(),
         api.getMetadataFields({}, currentTenant),
         api.searchKPIBank(),
         api.getOverrides(currentTenant),
         api.getAuditHistory(50, currentTenant),
+        api.getIngestedSources(currentTenant),
       ]);
 
       if (sumRes.status === 'fulfilled' && sumRes.value.success) {
@@ -92,6 +96,9 @@ export default function App() {
       if (audRes.status === 'fulfilled' && audRes.value.success) {
         setAuditLogs(audRes.value.data);
       }
+      if (sourcesRes.status === 'fulfilled' && sourcesRes.value.success) {
+        setIngestedSources(sourcesRes.value.data || []);
+      }
     } catch (err) {
       addToast('error', `Failed to load workspace data: ${err.message}`);
     } finally {
@@ -113,6 +120,11 @@ export default function App() {
   // ---------------------------------------------------------------------------
 
   const handleRunMapping = async (forceFallback = false) => {
+    if (!metadataFields || metadataFields.length === 0) {
+      addToast('warning', 'No canonical metadata fields found. Please ingest a Power BI project (.pbip) first.');
+      setIngestModalOpen(true);
+      return;
+    }
     setLoading(true);
     try {
       const res = await api.runMappingPipeline({ forceFallback }, tenantId);
@@ -221,8 +233,17 @@ export default function App() {
 
   return (
     <div id="app" className="app-container">
+      {/* MOBILE BACKDROP */}
+      {mobileMenuOpen && (
+        <div
+          className="sidebar-backdrop"
+          onClick={() => setMobileMenuOpen(false)}
+          aria-hidden="true"
+        />
+      )}
+
       {/* PERSISTENT LEFT NAVIGATION SIDEBAR */}
-      <aside className="sidebar">
+      <aside className={`sidebar ${mobileMenuOpen ? 'mobile-open' : ''}`}>
         <div className="sidebar-header">
           <div className="app-brand">
             <div className="app-logo">KPI</div>
@@ -241,7 +262,10 @@ export default function App() {
                 <button
                   key={v.id}
                   className={`nav-item ${activeView === v.id ? 'active' : ''}`}
-                  onClick={() => setActiveView(v.id)}
+                  onClick={() => {
+                    setActiveView(v.id);
+                    setMobileMenuOpen(false);
+                  }}
                 >
                   <span className="nav-icon">{v.icon}</span>
                   <span className="nav-label">{v.label}</span>
@@ -287,12 +311,21 @@ export default function App() {
       <main className="main-content">
         <header className="top-bar">
           <div className="top-bar-left">
-            <h1 className="page-header-title">
-              {VIEWS.find(v => v.id === activeView)?.label || 'Workspace'}
-            </h1>
-            <span className="page-header-subtitle">
-              Canonical model KPI mapping, domain classification, and human governance
-            </span>
+            <button
+              className="mobile-menu-btn"
+              onClick={() => setMobileMenuOpen(prev => !prev)}
+              aria-label="Toggle navigation menu"
+            >
+              ☰
+            </button>
+            <div className="top-bar-titles">
+              <h1 className="page-header-title">
+                {VIEWS.find(v => v.id === activeView)?.label || 'Workspace'}
+              </h1>
+              <span className="page-header-subtitle">
+                Canonical model KPI mapping, domain classification, and human governance
+              </span>
+            </div>
           </div>
           <div className="top-bar-right">
             <div className="system-status-pill">
@@ -303,6 +336,13 @@ export default function App() {
                   : 'Deterministic Fallback Active'}
               </span>
             </div>
+            <button
+              className="apple-button secondary"
+              onClick={() => setIngestModalOpen(true)}
+              title="Upload PBIP files or select a project folder"
+            >
+              <span>📥 Ingest Sources</span>
+            </button>
             <button
               className="apple-button primary"
               onClick={() => handleRunMapping(false)}
@@ -317,6 +357,20 @@ export default function App() {
           {/* VIEW 1: WORKSPACE OVERVIEW */}
           {activeView === 'overview' && (
             <section className="view-panel active">
+              {/* Guidance / Ingestion Entry Point */}
+              <div className="banner-guidance">
+                <div className="banner-text">
+                  <h4>Power BI Project Ingestion</h4>
+                  <p>Upload a Power BI Project (.pbip) folder or zip archive to extract measures and semantic models into the canonical catalog.</p>
+                </div>
+                <button
+                  className="apple-button primary small"
+                  onClick={() => setIngestModalOpen(true)}
+                >
+                  📥 Ingest Power BI Source
+                </button>
+              </div>
+
               <div className="kpi-metrics-grid">
                 <div className="metric-card">
                   <div className="metric-header">
@@ -433,6 +487,57 @@ export default function App() {
           {/* VIEW 2: INGESTION & METADATA */}
           {activeView === 'metadata' && (
             <section className="view-panel active">
+              {/* Ingested Analytical Sources */}
+              <div className="apple-card" style={{ marginBottom: '20px' }}>
+                <div className="apple-card-header">
+                  <div className="apple-card-title-group">
+                    <h3 className="apple-card-title">Ingested Analytical Sources</h3>
+                    <span className="apple-card-subtitle">
+                      Power BI Projects (.pbip) and semantic models registered in canonical persistence
+                    </span>
+                  </div>
+                  <button className="apple-button primary small" onClick={() => setIngestModalOpen(true)}>
+                    📥 Ingest Sources
+                  </button>
+                </div>
+                <div className="apple-card-body no-padding">
+                  <table className="apple-table">
+                    <thead>
+                      <tr>
+                        <th>Asset Name</th>
+                        <th>Platform</th>
+                        <th>Version</th>
+                        <th>Status</th>
+                        <th>Ingested At</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {ingestedSources.length === 0 ? (
+                        <tr>
+                          <td colSpan="5" className="text-center empty-state">
+                            No source assets registered yet. Click "Ingest Sources" to upload PBIP files or select a project directory.
+                          </td>
+                        </tr>
+                      ) : (
+                        ingestedSources.map(s => (
+                          <tr key={s.asset_id}>
+                            <td>
+                              <strong>{s.asset_name}</strong>
+                              <div className="code-hint">{s.asset_id}</div>
+                            </td>
+                            <td><span className="type-badge">{s.platform}</span></td>
+                            <td>v{s.version_number}</td>
+                            <td><span className="status-pill approved">{s.status}</span></td>
+                            <td className="code-hint">{s.ingested_at || 'Recently'}</td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              {/* Canonical Analytical Metadata */}
               <div className="apple-card">
                 <div className="apple-card-header">
                   <div className="apple-card-title-group">
@@ -452,6 +557,9 @@ export default function App() {
                         <option key={d.code} value={d.code}>{d.name}</option>
                       ))}
                     </select>
+                    <button className="apple-button secondary small" onClick={() => setIngestModalOpen(true)}>
+                      + Upload More
+                    </button>
                   </div>
                 </div>
                 <div className="apple-card-body no-padding">
@@ -468,7 +576,7 @@ export default function App() {
                     </thead>
                     <tbody>
                       {filteredMetadataFields.length === 0 ? (
-                        <tr><td colSpan="6" className="text-center empty-state">No metadata fields found.</td></tr>
+                        <tr><td colSpan="6" className="text-center empty-state">No metadata fields found. Ingest a Power BI Project to begin.</td></tr>
                       ) : (
                         filteredMetadataFields.map(f => (
                           <tr key={f.field_id}>
@@ -479,13 +587,15 @@ export default function App() {
                             <td><span className="type-badge">{f.entity_type}</span></td>
                             <td>{f.source_asset_id}</td>
                             <td>
-                              <span className="domain-badge">{f.domain}</span>
-                              <button
-                                className="link-action-btn"
-                                onClick={() => handleDomainCorrection(f.field_id, f.domain === 'CLAIMS_RISK' ? 'UNDERWRITING' : 'CLAIMS_RISK')}
-                              >
-                                Reclassify
-                              </button>
+                              <div className="table-domain-cell">
+                                <span className="domain-badge">{f.domain}</span>
+                                <button
+                                  className="link-action-btn"
+                                  onClick={() => handleDomainCorrection(f.field_id, f.domain === 'CLAIMS_RISK' ? 'UNDERWRITING' : 'CLAIMS_RISK')}
+                                >
+                                  Reclassify
+                                </button>
+                              </div>
                             </td>
                             <td>
                               <span className={`status-pill ${f.mapping_status?.toLowerCase()}`}>
@@ -1034,6 +1144,19 @@ export default function App() {
         />
       )}
 
+      {/* INGEST SOURCES MODAL */}
+      {ingestModalOpen && (
+        <IngestSourcesModalComponent
+          open={ingestModalOpen}
+          tenantId={tenantId}
+          onClose={() => setIngestModalOpen(false)}
+          onIngestionComplete={async () => {
+            await refreshAllData();
+          }}
+          addToast={addToast}
+        />
+      )}
+
       {/* TOAST CONTAINER */}
       <div className="toast-container">
         {toasts.map(t => (
@@ -1262,6 +1385,434 @@ function AddKpiModalComponent({ modal, domains, existingKpis, onClose, onSubmit 
             </button>
           </div>
         </form>
+      </div>
+    </div>
+  );
+}
+
+// -----------------------------------------------------------------------------
+// SUB-COMPONENTS: INGEST SOURCES MODAL
+// -----------------------------------------------------------------------------
+
+function IngestSourcesModalComponent({ open, onClose, tenantId, onIngestionComplete, addToast }) {
+  const [activeTab, setActiveTab] = useState('files'); // 'files' | 'folder'
+  const [selectedFiles, setSelectedFiles] = useState([]);
+  const [uploading, setUploading] = useState(false);
+  const [jobResult, setJobResult] = useState(null);
+  const [dragActive, setDragActive] = useState(false);
+  const [supportedFormats, setSupportedFormats] = useState(null);
+
+  useEffect(() => {
+    api.getSupportedFormats().then(res => {
+      if (res.success) {
+        setSupportedFormats(res.data);
+      }
+    }).catch(() => {});
+  }, []);
+
+  const recognizeFile = (filename) => {
+    const lower = filename.toLowerCase();
+    if (lower.endsWith('.pbip')) return { status: 'SUPPORTED', label: 'PBIP Project Root', valid: true };
+    if (lower.endsWith('.tmdl')) return { status: 'SUPPORTED', label: 'TMDL Measure/Table', valid: true };
+    if (lower.endsWith('.json') || lower.endsWith('.pbir') || lower.endsWith('.pbism')) {
+      return { status: 'SUPPORTED', label: 'PBIP Definition', valid: true };
+    }
+    if (lower.endsWith('.zip')) return { status: 'SUPPORTED', label: 'PBIP Zip Archive', valid: true };
+    if (lower.endsWith('.pbix')) return { status: 'UNSUPPORTED', label: 'Legacy Binary (.pbix)', valid: false };
+    if (lower.endsWith('.xlsx') || lower.endsWith('.xlsm')) return { status: 'PLANNED', label: 'Excel (Planned)', valid: false };
+    if (lower.endsWith('.twbx') || lower.endsWith('.twb')) return { status: 'PLANNED', label: 'Tableau (Planned)', valid: false };
+    return { status: 'OTHER', label: 'Other File', valid: true };
+  };
+
+  const handleFileSelect = (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    const mapped = files.map(f => {
+      const rec = recognizeFile(f.name);
+      return {
+        file: f,
+        relativePath: f.name,
+        ...rec,
+      };
+    });
+    setSelectedFiles(prev => [...prev, ...mapped]);
+    e.target.value = '';
+  };
+
+  const handleFolderSelect = (e) => {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    const mapped = files.map(f => {
+      const relPath = f.webkitRelativePath || f.name;
+      const rec = recognizeFile(relPath);
+      return {
+        file: f,
+        relativePath: relPath,
+        ...rec,
+      };
+    });
+    setSelectedFiles(mapped);
+    e.target.value = '';
+  };
+
+  const handleDrag = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (e.type === 'dragenter' || e.type === 'dragover') {
+      setDragActive(true);
+    } else if (e.type === 'dragleave') {
+      setDragActive(false);
+    }
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      const files = Array.from(e.dataTransfer.files);
+      const mapped = files.map(f => {
+        const rec = recognizeFile(f.name);
+        return {
+          file: f,
+          relativePath: f.name,
+          ...rec,
+        };
+      });
+      setSelectedFiles(prev => [...prev, ...mapped]);
+    }
+  };
+
+  const removeFile = (idx) => {
+    setSelectedFiles(prev => prev.filter((_, i) => i !== idx));
+  };
+
+  const clearFiles = () => {
+    setSelectedFiles([]);
+    setJobResult(null);
+  };
+
+  const hasPbipInFolder = useMemo(() => {
+    return selectedFiles.some(f => f.relativePath.toLowerCase().endsWith('.pbip'));
+  }, [selectedFiles]);
+
+  const totalSizeFormatted = useMemo(() => {
+    const totalBytes = selectedFiles.reduce((acc, f) => acc + (f.file?.size || 0), 0);
+    if (totalBytes < 1024) return `${totalBytes} B`;
+    if (totalBytes < 1024 * 1024) return `${(totalBytes / 1024).toFixed(1)} KB`;
+    return `${(totalBytes / (1024 * 1024)).toFixed(2)} MB`;
+  }, [selectedFiles]);
+
+  const hasUnsupportedBinary = useMemo(() => {
+    return selectedFiles.some(f => f.status === 'UNSUPPORTED' || f.status === 'PLANNED');
+  }, [selectedFiles]);
+
+  const handleStartIngestion = async () => {
+    if (!selectedFiles.length) return;
+    setUploading(true);
+    setJobResult(null);
+
+    try {
+      let res;
+      if (activeTab === 'files') {
+        const fileObjects = selectedFiles.map(s => s.file);
+        res = await api.uploadFiles(fileObjects, tenantId);
+      } else {
+        const items = selectedFiles.map(s => ({ file: s.file, relativePath: s.relativePath }));
+        res = await api.uploadFolder(items, tenantId);
+      }
+
+      if (res.success) {
+        setJobResult(res.data);
+        addToast('success', `Ingestion completed: ${res.data.files_processed} files processed, ${res.data.stats?.measures_extracted ?? 0} measures extracted.`);
+        onIngestionComplete();
+      } else {
+        addToast('error', res.error || 'Ingestion failed.');
+        setJobResult(res.data || { status: 'FAILED', error_message: res.error });
+      }
+    } catch (err) {
+      addToast('error', `Ingestion failed: ${err.message}`);
+      setJobResult({ status: 'FAILED', error_message: err.message });
+    } finally {
+      setUploading(false);
+    }
+  };
+
+  if (!open) return null;
+
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content large" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <div>
+            <h3 className="modal-title">Ingest Analytical Sources</h3>
+            <span className="page-header-subtitle" style={{ display: 'block', marginTop: '2px' }}>
+              Power BI Project (.pbip) extraction and canonical model registration
+            </span>
+          </div>
+          <button
+            type="button"
+            className="modal-close-btn"
+            onClick={onClose}
+            aria-label="Close modal"
+          >
+            ✕
+          </button>
+        </div>
+
+        <div className="modal-body">
+          {/* Format Support Callout */}
+          <div className="format-info-box">
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+              <span className="supported-badge supported">Supported</span>
+              <strong>Power BI Project (.pbip)</strong>
+            </div>
+            <p style={{ margin: 0, fontSize: '13px', lineHeight: 1.5 }}>
+              Accepts PBIP project folders or .zip archives with TMDL semantic models (<code>.pbip</code>, <code>.pbir</code>, <code>.pbism</code>, <code>.tmdl</code>, <code>.json</code>).
+            </p>
+            <div style={{ marginTop: '8px', padding: '8px 12px', background: 'rgba(255, 159, 10, 0.1)', borderRadius: 'var(--radius-sm)', border: '1px solid rgba(255, 159, 10, 0.25)', fontSize: '12px', color: 'var(--text-primary)' }}>
+              <strong>Notice:</strong> Legacy binary files (<code>.pbix</code>), Excel, and Tableau are unsupported or planned. Save Power BI models as <strong>.pbip (Power BI Project)</strong> with TMDL to enable full semantic measure extraction.
+            </div>
+          </div>
+
+          {/* Navigation Tabs */}
+          <div className="ingest-tabs-header" role="tablist" aria-label="Ingestion Source Mode">
+            <button
+              className={`ingest-tab-btn ${activeTab === 'files' ? 'active' : ''}`}
+              onClick={() => { setActiveTab('files'); clearFiles(); }}
+              role="tab"
+              aria-selected={activeTab === 'files'}
+              type="button"
+            >
+              📄 Upload Files
+            </button>
+            <button
+              className={`ingest-tab-btn ${activeTab === 'folder' ? 'active' : ''}`}
+              onClick={() => { setActiveTab('folder'); clearFiles(); }}
+              role="tab"
+              aria-selected={activeTab === 'folder'}
+              type="button"
+            >
+              📁 Select PBIP Folder
+            </button>
+          </div>
+
+          {/* Tab 1: Upload Files */}
+          {activeTab === 'files' && (
+            <div>
+              <div
+                className={`ingest-dropzone ${dragActive ? 'drag-active' : ''}`}
+                onDragEnter={handleDrag}
+                onDragLeave={handleDrag}
+                onDragOver={handleDrag}
+                onDrop={handleDrop}
+                onClick={() => document.getElementById('file-upload-input').click()}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    document.getElementById('file-upload-input').click();
+                  }
+                }}
+                role="button"
+                tabIndex={0}
+                aria-label="Upload files drop zone"
+              >
+                <div className="dropzone-icon">☁️</div>
+                <div className="dropzone-title">Drag & drop PBIP project files or .zip archive</div>
+                <div className="dropzone-subtitle">Supports .pbip, .tmdl, .json, .pbir, .pbism, and .zip archives (up to 50 MB)</div>
+                <input
+                  id="file-upload-input"
+                  type="file"
+                  multiple
+                  style={{ display: 'none' }}
+                  onChange={handleFileSelect}
+                  accept=".pbip,.pbir,.pbism,.tmdl,.json,.zip,.pbix,.xlsx,.twbx"
+                />
+                <button
+                  type="button"
+                  className="apple-button secondary small"
+                  onClick={e => { e.stopPropagation(); document.getElementById('file-upload-input').click(); }}
+                >
+                  Browse Files
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Tab 2: Select Folder */}
+          {activeTab === 'folder' && (
+            <div>
+              <div
+                className="ingest-dropzone"
+                onClick={() => document.getElementById('folder-upload-input').click()}
+                onKeyDown={e => {
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault();
+                    document.getElementById('folder-upload-input').click();
+                  }
+                }}
+                role="button"
+                tabIndex={0}
+                aria-label="Select directory drop zone"
+              >
+                <div className="dropzone-icon">📁</div>
+                <div className="dropzone-title">Select PBIP Project Root Folder</div>
+                <div className="dropzone-subtitle">
+                  Select the folder containing your .pbip file and .SemanticModel/.Report subfolders
+                </div>
+                <input
+                  id="folder-upload-input"
+                  type="file"
+                  webkitdirectory=""
+                  directory=""
+                  multiple
+                  style={{ display: 'none' }}
+                  onChange={handleFolderSelect}
+                />
+                <button
+                  type="button"
+                  className="apple-button secondary small"
+                  onClick={e => { e.stopPropagation(); document.getElementById('folder-upload-input').click(); }}
+                >
+                  Select Directory
+                </button>
+              </div>
+
+              {selectedFiles.length > 0 && (
+                <div className="folder-tree-summary">
+                  <div>
+                    <strong>Selected Folder:</strong> {selectedFiles.length} files ({totalSizeFormatted})
+                    <div style={{ marginTop: '2px' }}>
+                      {hasPbipInFolder ? (
+                        <span style={{ color: 'var(--apple-green)', fontWeight: 600 }}>
+                          ✅ PBIP project root detected in folder
+                        </span>
+                      ) : (
+                        <span style={{ color: 'var(--apple-amber)', fontWeight: 600 }}>
+                          ⚠️ No .pbip file detected. Make sure to select the parent folder containing your .pbip project.
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <button type="button" className="link-action-btn" onClick={clearFiles}>
+                    Clear
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Warning if unsupported files included */}
+          {hasUnsupportedBinary && (
+            <div className="apple-alert warning" style={{ marginTop: '12px' }}>
+              ⚠️ One or more files are legacy binary (.pbix) or planned formats. They will be skipped during ingestion.
+            </div>
+          )}
+
+          {/* Selected Files Preview Table */}
+          {selectedFiles.length > 0 && (
+            <div style={{ marginTop: '16px' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                <span style={{ fontSize: '13px', fontWeight: 600 }}>
+                  Selected Files ({selectedFiles.length}) • Total: {totalSizeFormatted}
+                </span>
+                <button type="button" className="link-action-btn" onClick={clearFiles}>
+                  Clear All
+                </button>
+              </div>
+
+              <div className="file-preview-table-container">
+                <table className="apple-table small" aria-label="Selected files preview">
+                  <thead>
+                    <tr>
+                      <th>Relative Path / Name</th>
+                      <th>Type</th>
+                      <th>Size</th>
+                      <th>Status</th>
+                      <th style={{ textAlign: 'right' }}>Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {selectedFiles.slice(0, 100).map((f, idx) => (
+                      <tr key={idx}>
+                        <td className="file-path-cell" title={f.relativePath}>
+                          {f.relativePath}
+                        </td>
+                        <td><span className="code-hint">{f.label}</span></td>
+                        <td>{(f.file.size / 1024).toFixed(1)} KB</td>
+                        <td>
+                          <span className={`supported-badge ${f.status.toLowerCase()}`}>
+                            {f.status}
+                          </span>
+                        </td>
+                        <td style={{ textAlign: 'right' }}>
+                          <button
+                            type="button"
+                            className="link-action-btn"
+                            style={{ color: 'var(--apple-red)' }}
+                            onClick={() => removeFile(idx)}
+                            aria-label={`Remove ${f.relativePath}`}
+                          >
+                            ✕
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              {selectedFiles.length > 100 && (
+                <div className="code-hint" style={{ marginTop: '4px' }}>
+                  Showing first 100 of {selectedFiles.length} files.
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Job Completion / Diagnostics Box */}
+          {jobResult && (
+            <div
+              className={`apple-alert ${jobResult.status === 'COMPLETED' ? 'success' : 'error'}`}
+              style={{ marginTop: '16px' }}
+            >
+              {jobResult.status === 'COMPLETED' ? (
+                <div>
+                  <h4 style={{ margin: '0 0 6px 0' }}>✅ Ingestion Successful</h4>
+                  <div style={{ fontSize: '13px', lineHeight: 1.5 }}>
+                    <div><strong>Asset:</strong> {jobResult.asset_name} (<code>{jobResult.asset_id}</code>)</div>
+                    <div><strong>Files:</strong> {jobResult.files_processed} processed, {jobResult.files_skipped} skipped</div>
+                    {jobResult.stats && (
+                      <div>
+                        <strong>Extracted:</strong> {jobResult.stats.measures_extracted ?? 0} measures, {jobResult.stats.tables_extracted ?? 0} tables
+                      </div>
+                    )}
+                  </div>
+                </div>
+              ) : (
+                <div>
+                  <h4 style={{ margin: '0 0 6px 0' }}>❌ Ingestion Failed</h4>
+                  <p style={{ margin: 0, fontSize: '13px' }}>
+                    {jobResult.error_message || 'Could not parse PBIP project. Verify project structure.'}
+                  </p>
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        <div className="modal-footer">
+          <button type="button" className="apple-button secondary" onClick={onClose} disabled={uploading}>
+            {jobResult?.status === 'COMPLETED' ? 'Done' : 'Cancel'}
+          </button>
+          <button
+            type="button"
+            className="apple-button primary"
+            onClick={handleStartIngestion}
+            disabled={uploading || selectedFiles.length === 0}
+          >
+            {uploading ? '⏳ Extracting & Ingesting...' : 'Start Ingestion'}
+          </button>
+        </div>
       </div>
     </div>
   );

@@ -16,8 +16,9 @@ class ApiError extends Error {
 
 async function request(endpoint, options = {}, tenantId) {
   const url = `${API_BASE}${endpoint.startsWith('/') ? endpoint : `/${endpoint}`}`;
+  const isFormData = options.body instanceof FormData;
   const headers = {
-    'Content-Type': 'application/json',
+    ...(isFormData ? {} : { 'Content-Type': 'application/json' }),
     ...(tenantId ? { 'X-Tenant-ID': tenantId } : {}),
     ...(options.headers || {}),
   };
@@ -27,7 +28,7 @@ async function request(endpoint, options = {}, tenantId) {
     headers,
   };
 
-  if (config.body && typeof config.body === 'object' && !(config.body instanceof FormData)) {
+  if (config.body && typeof config.body === 'object' && !isFormData) {
     config.body = JSON.stringify(config.body);
   }
 
@@ -196,5 +197,43 @@ export const api = {
   // Audit
   async getAuditHistory(limit = 50, tenantId) {
     return request(`/audit/history?limit=${limit}`, { method: 'GET' }, tenantId);
+  },
+
+  // Ingestion & Sources
+  async getSupportedFormats() {
+    return request('/ingestion/supported-formats', { method: 'GET' });
+  },
+
+  async getIngestedSources(tenantId) {
+    return request('/ingestion/sources', { method: 'GET' }, tenantId);
+  },
+
+  async uploadFiles(files, tenantId) {
+    const formData = new FormData();
+    for (const file of files) {
+      formData.append('files', file);
+    }
+    return request('/ingestion/uploads', {
+      method: 'POST',
+      body: formData,
+    }, tenantId);
+  },
+
+  async uploadFolder(filesWithPaths, tenantId) {
+    const formData = new FormData();
+    const relativePaths = [];
+    for (const item of filesWithPaths) {
+      formData.append('files', item.file);
+      relativePaths.push(item.relativePath || item.file.name);
+    }
+    formData.append('relative_paths', JSON.stringify(relativePaths));
+    return request('/ingestion/folder-uploads', {
+      method: 'POST',
+      body: formData,
+    }, tenantId);
+  },
+
+  async getIngestionJob(jobId, tenantId) {
+    return request(`/ingestion/jobs/${encodeURIComponent(jobId)}`, { method: 'GET' }, tenantId);
   },
 };

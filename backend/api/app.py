@@ -15,6 +15,7 @@ Enterprise REST API providing:
 
 import os
 import re
+import json
 import logging
 from typing import Dict, List, Any, Optional, Tuple
 from datetime import datetime, timezone
@@ -29,6 +30,7 @@ from backend.domain.service import DOMAIN_METADATA
 from backend.storage.fixtures import TENANT_ALPHA
 from backend.repository.context import TenantAccessDeniedError
 from backend.repository.interfaces import DocumentNotFoundError, ConcurrencyConflictError
+from backend.ingestion.manager import IngestionManager, get_ingestion_manager
 
 logger = logging.getLogger("kpi_intel.api")
 
@@ -124,8 +126,13 @@ class InvalidateOverrideRequest(BaseModel):
 
 class AppDependencies:
     """Holds injectable services for FastAPI endpoints."""
-    def __init__(self, governance_service: Optional[GovernanceService] = None):
+    def __init__(
+        self,
+        governance_service: Optional[GovernanceService] = None,
+        ingestion_manager: Optional[IngestionManager] = None,
+    ):
         self.governance_service = governance_service or get_governance_service()
+        self.ingestion_manager = ingestion_manager or get_ingestion_manager(repository=self.governance_service.repo)
 
 
 _deps_instance: Optional[AppDependencies] = None
@@ -481,11 +488,177 @@ def list_audit_history(
 
 
 # =============================================================================
+# INGESTION & SOURCE UPLOAD ENDPOINTS
+# =============================================================================
+
+async def _extract_upload_files(request: Request) -> Tuple[List[Dict[str, Any]], Optional[str]]:
+    """
+    Extracts uploaded files and optional relative_paths from multipart/form-data or application/json,
+    using Python standard library to ensure 100% dependency-free operation.
+    """
+    content_type = request.headers.get("content-type", "")
+    body = await request.body()
+    files_data = []
+    relative_paths_json = None
+
+    if "multipart/form-data" in content_type:
+        import email
+        from email.policy import default
+
+        raw_headers = f"Content-Type: {content_type}\r\n\r\n".encode("utf-8")
+        msg = email.message_from_bytes(raw_headers + body, policy=default)
+        for part in msg.iter_parts():
+            field_name = part.get_param("name", header="content-disposition")
+            filename = part.get_filename()
+            if filename is not None:
+                content = part.get_payload(decode=True) or b""
+                files_data.append({
+                    "filename": filename,
+                    "content": content,
+                    "relative_path": filename,
+                })
+            elif field_name == "relative_paths":
+                payload_bytes = part.get_payload(decode=True)
+                if payload_bytes:
+                    relative_paths_json = payload_bytes.decode("utf-8", errors="replace")
+    elif "application/json" in content_type and body:
+        import base64
+        try:
+            payload = json.loads(body.decode("utf-8", errors="replace"))
+            for item in payload.get("files", []):
+                name = item.get("filename", "unknown.dat")
+                content = item.get("content")
+                if isinstance(content, str):
+                    if item.get("is_base64"):
+                        content_bytes = base64.b64decode(content)
+                    else:
+                        content_bytes = content.encode("utf-8")
+                elif isinstance(content, bytes):
+                    content_bytes = content
+                else:
+                    content_bytes = b""
+                files_data.append({
+                    "filename": name,
+                    "content": content_bytes,
+                    "relative_path": item.get("relative_path") or name,
+                })
+            rel_val = payload.get("relative_paths")
+            if isinstance(rel_val, list):
+                relative_paths_json = json.dumps(rel_val)
+            elif isinstance(rel_val, str):
+                relative_paths_json = rel_val
+        except Exception:
+            pass
+
+    return files_data, relative_paths_json
+
+
+@router.get("/ingestion/supported-formats")
+def get_supported_formats(deps: AppDependencies = Depends(get_dependencies)):
+    """Returns officially supported ingestion formats and limitations."""
+    formats = deps.ingestion_manager.get_supported_formats()
+    return {"success": True, "data": formats}
+
+
+@router.get("/ingestion/sources")
+def list_ingested_sources(
+    tenant_id: str = Depends(get_tenant_id),
+    deps: AppDependencies = Depends(get_dependencies),
+):
+    """Returns previously ingested assets and reports for the tenant."""
+    sources = deps.ingestion_manager.list_ingested_sources(tenant_id)
+    return {"success": True, "count": len(sources), "data": sources}
+
+
+@router.post("/ingestion/uploads")
+async def upload_files(
+    request: Request,
+    tenant_id: str = Depends(get_tenant_id),
+    deps: AppDependencies = Depends(get_dependencies),
+):
+    """
+    Uploads a batch of files (e.g. .pbip, .tmdl, .json, or .zip archive)
+    and executes ingestion into the canonical catalog.
+    """
+    files_data, _ = await _extract_upload_files(request)
+    if not files_data:
+        raise HTTPException(status_code=400, detail="No files provided in upload.")
+
+    result = deps.ingestion_manager.process_file_batch(
+        tenant_id=tenant_id,
+        files_data=files_data,
+    )
+
+    if result.get("status") == "FAILED":
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"success": False, "error": result.get("error_message"), "data": result},
+        )
+
+    return {"success": True, "data": result}
+
+
+@router.post("/ingestion/folder-uploads")
+async def upload_folder(
+    request: Request,
+    tenant_id: str = Depends(get_tenant_id),
+    deps: AppDependencies = Depends(get_dependencies),
+):
+    """
+    Uploads a folder hierarchy with preserved relative paths
+    and executes ingestion into the canonical catalog.
+    """
+    files_data, relative_paths_str = await _extract_upload_files(request)
+    if not files_data:
+        raise HTTPException(status_code=400, detail="No files provided in upload.")
+
+    parsed_paths: List[str] = []
+    if relative_paths_str:
+        try:
+            parsed_paths = json.loads(relative_paths_str)
+            if not isinstance(parsed_paths, list):
+                parsed_paths = []
+        except Exception:
+            parsed_paths = []
+
+    for idx, f in enumerate(files_data):
+        if idx < len(parsed_paths) and parsed_paths[idx]:
+            f["relative_path"] = parsed_paths[idx]
+
+    result = deps.ingestion_manager.process_file_batch(
+        tenant_id=tenant_id,
+        files_data=files_data,
+    )
+
+    if result.get("status") == "FAILED":
+        return JSONResponse(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            content={"success": False, "error": result.get("error_message"), "data": result},
+        )
+
+    return {"success": True, "data": result}
+
+
+@router.get("/ingestion/jobs/{job_id}")
+def get_ingestion_job(
+    job_id: str,
+    tenant_id: str = Depends(get_tenant_id),
+    deps: AppDependencies = Depends(get_dependencies),
+):
+    """Returns status and diagnostic output for an ingestion job."""
+    status_rec = deps.ingestion_manager.get_job_status(job_id, tenant_id)
+    if not status_rec:
+        raise HTTPException(status_code=404, detail=f"Ingestion job {job_id} not found.")
+    return {"success": True, "data": status_rec}
+
+
+# =============================================================================
 # APPLICATION FACTORY
 # =============================================================================
 
 def create_app(
     governance_service: Optional[GovernanceService] = None,
+    ingestion_manager: Optional[IngestionManager] = None,
     cors_origins: Optional[List[str]] = None,
 ) -> FastAPI:
     """
@@ -496,8 +669,11 @@ def create_app(
     - Global exception handlers
     """
     global _deps_instance
-    if governance_service is not None:
-        _deps_instance = AppDependencies(governance_service=governance_service)
+    if governance_service is not None or ingestion_manager is not None:
+        _deps_instance = AppDependencies(
+            governance_service=governance_service,
+            ingestion_manager=ingestion_manager,
+        )
 
     app = FastAPI(
         title="KPI Intelligence API",
@@ -593,9 +769,13 @@ class KPIIntelligenceAPI:
     routing requests through FastAPI's TestClient.
     """
 
-    def __init__(self, governance_service: Optional[GovernanceService] = None):
+    def __init__(
+        self,
+        governance_service: Optional[GovernanceService] = None,
+        ingestion_manager: Optional[IngestionManager] = None,
+    ):
         from fastapi.testclient import TestClient
-        self.fastapi_app = create_app(governance_service=governance_service)
+        self.fastapi_app = create_app(governance_service=governance_service, ingestion_manager=ingestion_manager)
         self.client = TestClient(self.fastapi_app)
 
     def handle_request(
