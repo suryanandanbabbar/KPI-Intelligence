@@ -179,7 +179,7 @@ Authoritative versions obtained from repository manifests (`requirements.txt`, `
 | **Backend Framework** | FastAPI | `0.162.0` (`>=0.110.0,<1.0.0`) | REST API with OpenAPI documentation |
 | **ASGI Web Server** | Uvicorn | `0.54.0` (`>=0.30.0,<1.0.0`) | High-performance ASGI HTTP server |
 | **Schema Validation** | Pydantic | `2.14.1` (`>=2.7.0,<3.0.0`) | Request/response data validation |
-| **HTTP Client** | HTTPX | `0.28.1` (`>=0.27.0,<1.0.0`) | Client for Azure Llama & test suites |
+| **HTTP Client** | Python stdlib urllib / HTTPX | stdlib / `0.28.1` | Production LLM client uses standard urllib; HTTPX for FastAPI TestClient |
 | **Cloud Storage** | Azure Cosmos DB SDK | `4.17.1` (`>=4.7.0,<5.0.0`) | Production NoSQL document store |
 | **Cloud Identity** | Azure Identity | `1.26.0` (`>=1.16.0,<2.0.0`) | Managed Identity credential provider |
 | **Relational Storage** | SQLite | 3.x (bundled with Python) | Local development & offline mirror |
@@ -640,6 +640,19 @@ The FastAPI backend provides 31 documented endpoints organized by operational do
   1. The application automatically defaults to `C:\kpi_tmp` on Windows and prefixes file paths with Windows extended syntax (`\\?\`).
   2. To customize the temporary workspace, set `KPI_TEMP_DIR` in `.env` to a short local directory, e.g. `KPI_TEMP_DIR=C:\kpi_tmp`.
   3. Ensure the current user has write permissions to create `C:\kpi_tmp` or specify an accessible short path.
+
+### 7. TLS Certificate Verification Failure (`[SSL: CERTIFICATE_VERIFY_FAILED]`)
+- **Symptom**: Azure AI Foundry Llama calls fail with `[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate`.
+- **Diagnostic**: The application uses Python's standard-library `urllib` transport which validates TLS certificates against the OS system trust store. On corporate Windows machines with intercepting SSL/TLS proxies (e.g. Zscaler or corporate gateway), Python may not find the corporate root CA if it is not exported or if Python's OpenSSL environment requires an explicit CA bundle.
+- **Resolution**:
+  1. The `urllib` transport automatically queries the Windows System Certificate Store (`Windows-ROOT`).
+  2. If running inside a corporate proxy environment that re-signs certificates, export your corporate Root CA certificate bundle to a `.pem` or `.crt` file and set the standard environment variable:
+     ```bash
+     set SSL_CERT_FILE=C:\path\to\corporate_ca_bundle.pem
+     # Or in .env:
+     # SSL_CERT_FILE=C:\path\to\corporate_ca_bundle.pem
+     ```
+  3. Certificate verification is strictly maintained for enterprise security; the client fails fast without retrying and provides actionable diagnostic remediation.
 
 ---
 

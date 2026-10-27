@@ -6,7 +6,7 @@ fastapi>=0.110.0,<1.0.0
 uvicorn[standard]>=0.30.0,<1.0.0
 pydantic>=2.7.0,<3.0.0
 
-# HTTP Client for Azure Llama & Integration Testing
+# HTTP Client for FastAPI TestClient Suite (Note: production LLM client uses stdlib urllib)
 httpx>=0.27.0,<1.0.0
 
 # Azure Cosmos DB for NoSQL SDK & Identity

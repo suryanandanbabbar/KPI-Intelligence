@@ -18,13 +18,17 @@ Validates:
 """
 
 import os
+import io
 import re
+import ssl
 import json
+import socket
 import tempfile
 import unittest
 from unittest.mock import patch, MagicMock
+import urllib.request
+import urllib.error
 
-import httpx
 from fastapi.testclient import TestClient
 
 from backend.matching.config import AzureLlamaConfig, load_local_dotenv
@@ -476,6 +480,264 @@ class TestAzureLlamaIntegration(unittest.TestCase):
         self.assertTrue(body["success"])
         self.assertGreater(body["data"]["total_fields"], 0)
         self.assertGreater(body["data"]["llm_processed_count"], 0)
+
+    # -------------------------------------------------------------------------
+    # 8. STANDARD-LIBRARY URLLIB TRANSPORT REGRESSION TESTS
+    # -------------------------------------------------------------------------
+
+    @patch("urllib.request.urlopen")
+    def test_urllib_request_construction_and_success(self, mock_urlopen):
+        """Verifies urllib request payload, headers, URL, and successful response parsing."""
+        config = AzureLlamaConfig(
+            azure_endpoint="https://test-foundry.openai.azure.com",
+            azure_deployment="llama-3.3-70b-instruct",
+            azure_llamakey="secret-key-12345",
+            azure_deployment_name="llama-deployment",
+            azure_openai_api_version="2024-06-01",
+        )
+        client = AzureLlamaClient(config)
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = json.dumps({
+            "choices": [
+                {"message": {"content": '{"result": "success"}'}}
+            ]
+        }).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        result = client.generate_chat_completion(
+            system_prompt="System prompt",
+            user_prompt="User prompt",
+            temperature=0.2,
+            max_tokens=100,
+        )
+
+        self.assertEqual(result, '{"result": "success"}')
+        self.assertEqual(mock_urlopen.call_count, 1)
+
+        # Inspect the Request object passed to urlopen
+        call_args, call_kwargs = mock_urlopen.call_args
+        req = call_args[0]
+        self.assertIsInstance(req, urllib.request.Request)
+        self.assertEqual(req.get_method(), "POST")
+        self.assertIn("openai/deployments/llama-deployment/chat/completions", req.full_url)
+        self.assertEqual(req.headers["Api-key"], "secret-key-12345")
+        self.assertEqual(req.headers["Authorization"], "Bearer secret-key-12345")
+        self.assertEqual(req.headers["Content-type"], "application/json")
+
+        # Inspect decoded request payload
+        payload = json.loads(req.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "llama-3.3-70b-instruct")
+        self.assertEqual(payload["temperature"], 0.2)
+        self.assertEqual(payload["max_tokens"], 100)
+        self.assertEqual(len(payload["messages"]), 2)
+        self.assertEqual(payload["messages"][0]["content"], "System prompt")
+        self.assertEqual(payload["messages"][1]["content"], "User prompt")
+
+    @patch("urllib.request.urlopen")
+    def test_urllib_multipart_content_extraction(self, mock_urlopen):
+        """Verifies multi-part message content lists are decoded properly."""
+        config = AzureLlamaConfig(
+            azure_endpoint="https://test.openai.azure.com",
+            azure_deployment="llama-3.3-70b-instruct",
+            azure_llamakey="secret-key",
+        )
+        client = AzureLlamaClient(config)
+
+        mock_resp = MagicMock()
+        mock_resp.status = 200
+        mock_resp.read.return_value = json.dumps({
+            "choices": [
+                {
+                    "message": {
+                        "content": [
+                            {"type": "text", "text": '{"recommendations": '},
+                            {"type": "text", "text": '[]}'},
+                        ]
+                    }
+                }
+            ]
+        }).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        res = client.generate_chat_completion("sys", "user")
+        self.assertEqual(res, '{"recommendations": []}')
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_urllib_http_error_429_throttling_retry(self, mock_urlopen, mock_sleep):
+        """Verifies HTTP 429 triggers bounded retries with exponential backoff and THROTTLED exception."""
+        config = AzureLlamaConfig(
+            azure_endpoint="https://test.openai.azure.com",
+            azure_deployment="llama-3.3-70b",
+            azure_llamakey="key",
+            max_retries=2,
+            retry_backoff_seconds=1.0,
+        )
+        client = AzureLlamaClient(config)
+
+        error_fp = io.BytesIO(b'{"error": "Too Many Requests"}')
+        http_err = urllib.error.HTTPError(
+            url="https://test.openai.azure.com",
+            code=429,
+            msg="Too Many Requests",
+            hdrs={},
+            fp=error_fp,
+        )
+        mock_urlopen.side_effect = http_err
+
+        with self.assertRaises(AzureLlamaClientError) as ctx:
+            client.generate_chat_completion("sys", "user")
+
+        self.assertEqual(ctx.exception.category, "THROTTLED")
+        self.assertEqual(ctx.exception.status_code, 429)
+        self.assertEqual(mock_urlopen.call_count, 3)  # 1 initial + 2 retries
+        self.assertEqual(mock_sleep.call_count, 2)
+        mock_sleep.assert_any_call(1.0)
+        mock_sleep.assert_any_call(2.0)
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_urllib_http_error_503_transient_retry(self, mock_urlopen, mock_sleep):
+        """Verifies HTTP 503 triggers bounded retries with exponential backoff."""
+        config = AzureLlamaConfig(
+            azure_endpoint="https://test.openai.azure.com",
+            azure_deployment="llama-3.3-70b",
+            azure_llamakey="key",
+            max_retries=1,
+            retry_backoff_seconds=0.5,
+        )
+        client = AzureLlamaClient(config)
+
+        error_fp = io.BytesIO(b"Service Unavailable")
+        http_err = urllib.error.HTTPError(
+            url="https://test.openai.azure.com",
+            code=503,
+            msg="Service Unavailable",
+            hdrs={},
+            fp=error_fp,
+        )
+        mock_urlopen.side_effect = http_err
+
+        with self.assertRaises(AzureLlamaClientError) as ctx:
+            client.generate_chat_completion("sys", "user")
+
+        self.assertEqual(ctx.exception.category, "HTTP_ERROR")
+        self.assertEqual(ctx.exception.status_code, 503)
+        self.assertEqual(mock_urlopen.call_count, 2)
+        mock_sleep.assert_called_once_with(0.5)
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_urllib_http_error_401_no_retry(self, mock_urlopen, mock_sleep):
+        """Verifies HTTP 401 client error fails fast without retrying."""
+        config = AzureLlamaConfig(
+            azure_endpoint="https://test.openai.azure.com",
+            azure_deployment="llama-3.3-70b",
+            azure_llamakey="invalid-key",
+            max_retries=2,
+        )
+        client = AzureLlamaClient(config)
+
+        error_fp = io.BytesIO(b'{"error": "Unauthorized"}')
+        http_err = urllib.error.HTTPError(
+            url="https://test.openai.azure.com",
+            code=401,
+            msg="Unauthorized",
+            hdrs={},
+            fp=error_fp,
+        )
+        mock_urlopen.side_effect = http_err
+
+        with self.assertRaises(AzureLlamaClientError) as ctx:
+            client.generate_chat_completion("sys", "user")
+
+        self.assertEqual(ctx.exception.category, "CLIENT_INITIALIZATION_FAILED")
+        self.assertEqual(ctx.exception.status_code, 401)
+        self.assertEqual(mock_urlopen.call_count, 1)  # No retry
+        mock_sleep.assert_not_called()
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_urllib_tls_certificate_verification_failed_fast_fail(self, mock_urlopen, mock_sleep):
+        """Verifies TLS certificate verification error fails fast without retrying and provides remediation."""
+        config = AzureLlamaConfig(
+            azure_endpoint="https://test-foundry.openai.azure.com",
+            azure_deployment="llama-3.3-70b",
+            azure_llamakey="secret-key",
+            max_retries=3,
+        )
+        client = AzureLlamaClient(config)
+
+        ssl_err = ssl.SSLCertVerificationError(
+            1,
+            "[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed: unable to get local issuer certificate (_ssl.c:1006)"
+        )
+        url_err = urllib.error.URLError(reason=ssl_err)
+        mock_urlopen.side_effect = url_err
+
+        with self.assertRaises(AzureLlamaClientError) as ctx:
+            client.generate_chat_completion("sys", "user")
+
+        self.assertEqual(ctx.exception.category, "CLIENT_INITIALIZATION_FAILED")
+        self.assertIn("CERTIFICATE_VERIFY_FAILED", str(ctx.exception))
+        self.assertIn("SSL_CERT_FILE", str(ctx.exception))
+        self.assertEqual(mock_urlopen.call_count, 1)  # Fast fail, no retry
+        mock_sleep.assert_not_called()
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_urllib_timeout_error_retry(self, mock_urlopen, mock_sleep):
+        """Verifies socket timeout triggers bounded retry with backoff."""
+        config = AzureLlamaConfig(
+            azure_endpoint="https://test.openai.azure.com",
+            azure_deployment="llama-3.3-70b",
+            azure_llamakey="key",
+            max_retries=1,
+            retry_backoff_seconds=1.0,
+        )
+        client = AzureLlamaClient(config)
+
+        mock_urlopen.side_effect = urllib.error.URLError(reason=socket.timeout("timed out"))
+
+        with self.assertRaises(AzureLlamaClientError) as ctx:
+            client.generate_chat_completion("sys", "user")
+
+        self.assertEqual(ctx.exception.category, "TIMEOUT")
+        self.assertEqual(mock_urlopen.call_count, 2)
+        mock_sleep.assert_called_once_with(1.0)
+
+    @patch("urllib.request.urlopen")
+    def test_urllib_secret_redacted_from_error_body(self, mock_urlopen):
+        """Verifies that API keys in error response bodies are redacted."""
+        secret_token = "super-secret-azure-token-998877"
+        config = AzureLlamaConfig(
+            azure_endpoint="https://test.openai.azure.com",
+            azure_deployment="llama-3.3-70b",
+            azure_llamakey=secret_token,
+            max_retries=0,
+        )
+        client = AzureLlamaClient(config)
+
+        error_fp = io.BytesIO(f"Error authenticating with key {secret_token}".encode("utf-8"))
+        http_err = urllib.error.HTTPError(
+            url="https://test.openai.azure.com",
+            code=400,
+            msg="Bad Request",
+            hdrs={},
+            fp=error_fp,
+        )
+        mock_urlopen.side_effect = http_err
+
+        with self.assertRaises(AzureLlamaClientError) as ctx:
+            client.generate_chat_completion("sys", "user")
+
+        err_msg = str(ctx.exception)
+        self.assertNotIn(secret_token, err_msg)
+        self.assertIn("[REDACTED]", err_msg)
 
 
 if __name__ == "__main__":
