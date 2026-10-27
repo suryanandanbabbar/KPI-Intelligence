@@ -9,10 +9,14 @@ bindings, visual properties, bookmarks, and filters.
 import os
 import json
 import uuid
+import logging
 from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Union
 from backend.connectors.powerbi.jsonc_parser import parse_jsonc, parse_jsonc_file
+from backend.ingestion.paths import to_extended_path, strip_extended_prefix, safe_open
+
+logger = logging.getLogger("kpi_intel.connectors.powerbi.report_parser")
 
 
 @dataclass
@@ -111,12 +115,12 @@ class ReportParser:
 
     @classmethod
     def parse_report_directory(cls, report_dir_path: str, asset_name: str = "Report") -> ReportDefinition:
-        """Parses an entire *.Report directory."""
+        """Parses an entire *.Report directory supporting both monolithic report.json and PBIR."""
         rep = ReportDefinition(report_name=asset_name)
 
         # 1. Parse definition.pbir
         pbir_path = os.path.join(report_dir_path, "definition.pbir")
-        if os.path.exists(pbir_path):
+        if os.path.exists(to_extended_path(pbir_path)):
             try:
                 pbir_data = parse_jsonc_file(pbir_path)
                 rep.pbir_version = str(pbir_data.get("version", ""))
@@ -126,21 +130,27 @@ class ReportParser:
             except Exception as e:
                 pass
 
-        # 2. Parse report.json
-        rep_json_path = os.path.join(report_dir_path, "report.json")
-        if os.path.exists(rep_json_path):
-            try:
-                raw_json = parse_jsonc_file(rep_json_path)
-                cls._parse_report_json(raw_json, rep)
-            except Exception as e:
-                pass
+        # 2. Check for modern PBIR structure: report_dir_path/definition/
+        def_dir = os.path.join(report_dir_path, "definition")
+        if os.path.isdir(to_extended_path(def_dir)):
+            cls._parse_pbir_definition(def_dir, rep)
 
-        # 3. Parse CustomVisuals
+        # 3. Fallback: Parse monolithic report.json (if pages were not populated by PBIR)
+        if not rep.pages:
+            rep_json_path = os.path.join(report_dir_path, "report.json")
+            if os.path.exists(to_extended_path(rep_json_path)):
+                try:
+                    raw_json = parse_jsonc_file(rep_json_path)
+                    cls._parse_report_json(raw_json, rep)
+                except Exception as e:
+                    pass
+
+        # 4. Parse CustomVisuals
         custom_vis_dir = os.path.join(report_dir_path, "CustomVisuals")
-        if os.path.exists(custom_vis_dir):
-            for vfolder in sorted(os.listdir(custom_vis_dir)):
+        if os.path.exists(to_extended_path(custom_vis_dir)):
+            for vfolder in sorted(os.listdir(to_extended_path(custom_vis_dir))):
                 pkg_json = os.path.join(custom_vis_dir, vfolder, "package.json")
-                if os.path.exists(pkg_json):
+                if os.path.exists(to_extended_path(pkg_json)):
                     try:
                         pkg_data = parse_jsonc_file(pkg_json)
                         vis_info = pkg_data.get("visual", {})
@@ -160,6 +170,209 @@ class ReportParser:
                         pass
 
         return rep
+
+    @classmethod
+    def _parse_pbir_definition(cls, def_dir: str, rep: ReportDefinition) -> None:
+        """Parses a PBIR definition directory containing report.json, pages, and visuals."""
+        # 1. Parse definition/report.json (theme, config, filters, settings)
+        rep_json_path = os.path.join(def_dir, "report.json")
+        if os.path.exists(to_extended_path(rep_json_path)):
+            try:
+                raw_json = parse_jsonc_file(rep_json_path)
+                rep.theme = raw_json.get("theme")
+                if "config" in raw_json:
+                    raw_cfg = _safe_json_unpack(raw_json.get("config", {}))
+                    if isinstance(raw_cfg, dict):
+                        rep.report_configuration = raw_cfg
+                if "filters" in raw_json:
+                    raw_f = _safe_json_unpack(raw_json.get("filters", []))
+                    if isinstance(raw_f, list):
+                        rep.report_filters = raw_f
+                # If report.json in definition contains sections, parse them
+                if "sections" in raw_json and isinstance(raw_json["sections"], list):
+                    cls._parse_report_json(raw_json, rep)
+            except Exception as e:
+                logger.debug("Error parsing PBIR definition/report.json: %s", e)
+
+        # 2. Parse definition/pages/ (if pages were not in report.json)
+        pages_dir = os.path.join(def_dir, "pages")
+        if os.path.isdir(to_extended_path(pages_dir)) and not rep.pages:
+            # Check for pages.json metadata
+            page_order_map: Dict[str, int] = {}
+            pages_meta_path = os.path.join(pages_dir, "pages.json")
+            if os.path.exists(to_extended_path(pages_meta_path)):
+                try:
+                    p_meta = parse_jsonc_file(pages_meta_path)
+                    order_list = p_meta.get("pageOrder") if isinstance(p_meta, dict) else None
+                    if isinstance(order_list, list):
+                        page_order_map = {p_name: idx for idx, p_name in enumerate(order_list)}
+                except Exception:
+                    pass
+
+            # Discover page directories
+            p_folders = [
+                d for d in os.listdir(to_extended_path(pages_dir))
+                if os.path.isdir(to_extended_path(os.path.join(pages_dir, d)))
+            ]
+            p_folders.sort(key=lambda d: page_order_map.get(d, 999999))
+
+            for order_idx, p_folder in enumerate(p_folders):
+                p_dir = os.path.join(pages_dir, p_folder)
+                page_json_path = os.path.join(p_dir, "page.json")
+
+                page_name = p_folder
+                disp_name = p_folder
+                width = 1280.0
+                height = 720.0
+                filters: List[Dict[str, Any]] = []
+                page_props: Dict[str, Any] = {}
+
+                if os.path.exists(to_extended_path(page_json_path)):
+                    try:
+                        p_data = parse_jsonc_file(page_json_path)
+                        page_name = p_data.get("name", p_folder)
+                        disp_name = p_data.get("displayName", page_name)
+                        width = float(p_data.get("width", 1280.0))
+                        height = float(p_data.get("height", 720.0))
+                        raw_f = _safe_json_unpack(p_data.get("filters", []))
+                        if isinstance(raw_f, list):
+                            filters = raw_f
+                        page_props = p_data
+                    except Exception:
+                        pass
+
+                page = ReportPage(
+                    source_native_id=page_name,
+                    page_name=disp_name,
+                    page_order=order_idx,
+                    width=width,
+                    height=height,
+                    filters=filters,
+                    page_properties=page_props,
+                )
+
+                # Parse visuals under page directory
+                visuals_dir = os.path.join(p_dir, "visuals")
+                if os.path.isdir(to_extended_path(visuals_dir)):
+                    v_folders = sorted([
+                        v for v in os.listdir(to_extended_path(visuals_dir))
+                        if os.path.isdir(to_extended_path(os.path.join(visuals_dir, v)))
+                    ])
+                    for v_idx, v_folder in enumerate(v_folders):
+                        v_json_path = os.path.join(visuals_dir, v_folder, "visual.json")
+                        if os.path.exists(to_extended_path(v_json_path)):
+                            try:
+                                v_data = parse_jsonc_file(v_json_path)
+                                visual = cls._parse_pbir_visual(v_data, v_folder, v_idx)
+                                page.visuals.append(visual)
+                            except Exception as ex:
+                                logger.debug("Error parsing PBIR visual %s: %s", v_json_path, ex)
+
+                rep.pages.append(page)
+
+    @classmethod
+    def _parse_pbir_visual(cls, v_data: Dict[str, Any], folder_name: str, default_idx: int) -> ReportVisual:
+        """Parses a PBIR visual.json file into a ReportVisual object."""
+        vis_id = v_data.get("name", folder_name)
+        pos = v_data.get("position", {})
+        x = pos.get("x")
+        y = pos.get("y")
+        width = pos.get("width")
+        height = pos.get("height")
+        z = pos.get("z", default_idx)
+
+        vis_spec = v_data.get("visual", {}) if isinstance(v_data.get("visual"), dict) else v_data
+        vis_type = vis_spec.get("visualType") or v_data.get("visualType", "unknown")
+
+        objects = vis_spec.get("objects", {}) if isinstance(vis_spec.get("objects"), dict) else {}
+        title = None
+        description = None
+
+        if isinstance(objects, dict):
+            title_obj = objects.get("title", [{}])
+            if isinstance(title_obj, list) and len(title_obj) > 0:
+                props = title_obj[0].get("properties", {})
+                text_expr = props.get("text", {}).get("expr", {}).get("Literal", {}).get("Value")
+                if text_expr:
+                    title = str(text_expr).strip("'\"")
+
+        bindings: List[ReportVisualBinding] = []
+        binding_order = 0
+
+        # Projections can be under visual.query.queryState or direct projections
+        query_spec = vis_spec.get("query", {})
+        query_state = query_spec.get("queryState", {}) if isinstance(query_spec, dict) else {}
+
+        for role, role_val in query_state.items():
+            if isinstance(role_val, dict) and "projections" in role_val:
+                proj_list = role_val.get("projections", [])
+                if isinstance(proj_list, list):
+                    for proj in proj_list:
+                        if not isinstance(proj, dict):
+                            continue
+                        binding_order += 1
+                        qref = proj.get("queryRef", "")
+                        entity = None
+                        prop = None
+                        if "." in qref:
+                            parts = qref.split(".", 1)
+                            entity = parts[0]
+                            prop = parts[1]
+                        elif "field" in proj and isinstance(proj["field"], dict):
+                            # e.g. {"Measure": {"Expression": {"SourceRef": {"Entity": "Loss"}}, "Property": "Rate"}}
+                            for f_type in ("Measure", "Column"):
+                                if f_type in proj["field"]:
+                                    f_obj = proj["field"][f_type]
+                                    entity = f_obj.get("Expression", {}).get("SourceRef", {}).get("Entity")
+                                    prop = f_obj.get("Property")
+                        bindings.append(ReportVisualBinding(
+                            binding_role=role,
+                            target_entity=entity,
+                            target_property=prop,
+                            binding_order=binding_order,
+                            binding_properties=proj,
+                        ))
+
+        # Check top-level projections if queryState was not present
+        if not bindings and "projections" in vis_spec:
+            projections = vis_spec.get("projections", {})
+            if isinstance(projections, dict):
+                for role, proj_list in projections.items():
+                    if isinstance(proj_list, list):
+                        for proj in proj_list:
+                            if not isinstance(proj, dict):
+                                continue
+                            binding_order += 1
+                            qref = proj.get("queryRef", "")
+                            entity = None
+                            prop = None
+                            if "." in qref:
+                                parts = qref.split(".", 1)
+                                entity = parts[0]
+                                prop = parts[1]
+                            bindings.append(ReportVisualBinding(
+                                binding_role=role,
+                                target_entity=entity,
+                                target_property=prop,
+                                binding_order=binding_order,
+                                binding_properties=proj,
+                            ))
+
+        return ReportVisual(
+            visual_id=vis_id,
+            visual_type=vis_type,
+            title=title,
+            description=description,
+            position_x=float(x) if x is not None else None,
+            position_y=float(y) if y is not None else None,
+            width=float(width) if width is not None else None,
+            height=float(height) if height is not None else None,
+            z_order=int(z) if z is not None else default_idx,
+            bindings=bindings,
+            visual_properties=objects,
+            filters=v_data.get("filters", []),
+            raw_config=v_data,
+        )
 
     @classmethod
     def _parse_report_json(cls, data: Dict[str, Any], rep: ReportDefinition) -> None:

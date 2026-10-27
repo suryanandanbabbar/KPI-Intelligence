@@ -402,6 +402,7 @@ All settings can be configured via environment variables or a local `.env` file 
 | `KPI_ENVIRONMENT` | Optional | `development` | Environment mode: `development`, `test`, `staging`, `production`. |
 | `KPI_STORAGE_BACKEND` | Optional | `sqlite` | Persistence engine: `sqlite` (dev/test only) or `cosmos` (staging/prod). |
 | `KPI_SQLITE_PATH` | Optional | `local_data/kpi_intelligence.sqlite3` | Relative or absolute path to local SQLite database. |
+| `KPI_TEMP_DIR` | Optional | `C:\kpi_tmp` (Win) / `local_data/temp_ingestion` (Unix) | Temporary workspace for PBIP uploads. Prevents Windows WinError 206. |
 | `COSMOS_ENDPOINT` | Prod Only | *None* | Cosmos DB account URI (`https://<account>.documents.azure.com:443/`). |
 | `COSMOS_DATABASE` | Prod Only | `kpi_intelligence` | Target database name in Cosmos DB. |
 | `COSMOS_USE_MANAGED_IDENTITY` | Optional | `true` | Use Azure Managed Identity (`true` / `false`). |
@@ -631,6 +632,14 @@ The FastAPI backend provides 31 documented endpoints organized by operational do
 - **Symptom**: Backend logs display `Azure Llama client failed [THROTTLED]: Rate limit. Falling back to deterministic matching.`
 - **Diagnostic**: Check `GET /api/v1/llm/status` to inspect configuration status.
 - **Resolution**: This is normal resilience behavior. The application automatically falls back to deterministic matching to prevent pipeline failures. If unexpected, check your Azure AI Foundry quota or adjust `KPI_LLM_TIMEOUT_SECONDS` and `KPI_LLM_MAX_RETRIES` in `.env`.
+
+### 6. Windows Path Limit (`[WinError 206] The filename or extension is too long`)
+- **Symptom**: Ingestion of deeply nested Power BI PBIP/PBIR folders fails on Windows with `[WinError 206] The filename or extension is too long`.
+- **Diagnostic**: Occurs when staging deep report structures (e.g. `definition\pages\...\visuals\...\visual.json`) within deeply nested workspace directories (e.g. `C:\Users\...\OneDrive - ...\Documents\...`), exceeding the 260-character Win32 MAX_PATH limit.
+- **Resolution**:
+  1. The application automatically defaults to `C:\kpi_tmp` on Windows and prefixes file paths with Windows extended syntax (`\\?\`).
+  2. To customize the temporary workspace, set `KPI_TEMP_DIR` in `.env` to a short local directory, e.g. `KPI_TEMP_DIR=C:\kpi_tmp`.
+  3. Ensure the current user has write permissions to create `C:\kpi_tmp` or specify an accessible short path.
 
 ---
 

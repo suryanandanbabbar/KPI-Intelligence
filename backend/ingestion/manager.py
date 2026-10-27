@@ -8,6 +8,7 @@ Handles:
 - Integration with Power BI PBIP ingestion pipeline (IngestionService)
 - Tenant-scoped job status tracking and diagnostic reporting
 - Safe cleanup of temporary staging files
+- Cross-platform long-path resilience (Windows WinError 206 mitigation)
 """
 
 import os
@@ -25,6 +26,17 @@ from backend.repository.interfaces import IRepository, QuerySpec
 from backend.repository.context import TenantContext
 from backend.contracts import CosmosContainer, DocumentType
 from backend.storage.factory import get_repository
+from backend.ingestion.paths import (
+    resolve_staging_root,
+    generate_short_job_id,
+    validate_path_component_lengths,
+    safe_makedirs,
+    safe_open,
+    safe_rmtree,
+    to_extended_path,
+    strip_extended_prefix,
+    format_path_error_diagnostic,
+)
 
 logger = logging.getLogger("kpi_intel.ingestion.manager")
 
@@ -75,10 +87,7 @@ class IngestionManager:
 
     def __init__(self, repository: Optional[IRepository] = None, staging_root: Optional[str] = None):
         self.repo = repository or get_repository()
-        self.staging_root = staging_root or os.path.abspath(
-            os.path.join(os.path.dirname(__file__), "..", "..", "local_data", "temp_ingestion")
-        )
-        os.makedirs(self.staging_root, exist_ok=True)
+        self.staging_root = resolve_staging_root(staging_root)
         self._jobs: Dict[str, IngestionJobRecord] = {}
 
     def get_supported_formats(self) -> Dict[str, Any]:
@@ -186,8 +195,10 @@ class IngestionManager:
     ) -> Dict[str, Any]:
         """
         Stages and executes ingestion of an uploaded file batch or folder.
+        Uses a short, isolated temporary workspace and Windows long-path prefixing
+        to prevent WinError 206 (path limit) errors during staging and parsing.
         """
-        job_id = f"job_{uuid.uuid4()}"
+        job_id, job_dirname = generate_short_job_id()
         now_iso = datetime.now(timezone.utc).isoformat()
 
         job = IngestionJobRecord(
@@ -199,8 +210,8 @@ class IngestionManager:
         )
         self._jobs[job_id] = job
 
-        job_dir = os.path.join(self.staging_root, job_id)
-        os.makedirs(job_dir, exist_ok=True)
+        job_dir = os.path.join(self.staging_root, job_dirname)
+        safe_makedirs(job_dir, exist_ok=True)
 
         try:
             # 1. Stage files and extract archives
@@ -211,6 +222,9 @@ class IngestionManager:
                 filename = f_item.get("filename", "unnamed.dat")
                 content = f_item.get("content", b"")
                 rel_path = f_item.get("relative_path") or filename
+
+                # Validate component length limits (max 255 chars per filename/dirname)
+                validate_path_component_lengths(rel_path)
 
                 # Security: Sanitize relative path to prevent directory traversal
                 safe_rel_path = self._sanitize_relative_path(rel_path)
@@ -224,10 +238,14 @@ class IngestionManager:
                     continue
 
                 dest_path = os.path.join(job_dir, safe_rel_path)
-                os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-
-                with open(dest_path, "wb") as out_f:
-                    out_f.write(content)
+                try:
+                    safe_makedirs(os.path.dirname(dest_path), exist_ok=True)
+                    with safe_open(dest_path, "wb") as out_f:
+                        out_f.write(content)
+                except OSError as os_err:
+                    diag = format_path_error_diagnostic(dest_path, "write_staged_file", os_err)
+                    job.diagnostics.append(diag)
+                    raise
 
                 # If a .zip was uploaded, extract it safely
                 if dest_path.endswith(".zip"):
@@ -267,15 +285,29 @@ class IngestionManager:
             logger.exception("Ingestion job %s failed: %s", job_id, ex)
             job.status = "FAILED"
             job.completed_at = datetime.now(timezone.utc).isoformat()
-            job.error_message = str(ex)
+
+            err_str = str(ex)
+            win_err = getattr(ex, "winerror", None)
+            err_no = getattr(ex, "errno", None)
+            if win_err == 206 or err_no == 36 or "too long" in err_str.lower() or "WinError 206" in err_str:
+                job.error_message = (
+                    f"Filesystem path length limit exceeded during ingestion: {err_str}. "
+                    "Configure a shorter temporary workspace path via the KPI_TEMP_DIR environment variable (e.g. C:\\kpi_tmp)."
+                )
+                if not any(d.get("code") == "PATH_LENGTH_EXCEEDED" for d in job.diagnostics):
+                    job.diagnostics.append({
+                        "code": "PATH_LENGTH_EXCEEDED",
+                        "error": err_str,
+                        "remediation": "Configure a shorter temporary workspace path via KPI_TEMP_DIR (e.g. C:\\kpi_tmp)."
+                    })
+            else:
+                job.error_message = err_str
+
             return job.to_dict()
 
         finally:
-            # Clean up temporary staging directory
-            try:
-                shutil.rmtree(job_dir, ignore_errors=True)
-            except Exception:
-                pass
+            # Clean up temporary staging directory safely
+            safe_rmtree(job_dir, ignore_errors=True)
 
     def _sanitize_relative_path(self, rel_path: str) -> str:
         """Sanitizes user-provided relative path to prevent directory traversal."""
@@ -284,21 +316,34 @@ class IngestionManager:
         return "/".join(parts)
 
     def _extract_zip_safely(self, zip_path: str, extract_to: str) -> None:
-        """Extracts a zip file preventing path traversal attacks."""
-        with zipfile.ZipFile(zip_path, "r") as zf:
+        """Extracts a zip file preventing path traversal attacks, with long path resilience."""
+        ext_zip = to_extended_path(zip_path)
+        with zipfile.ZipFile(ext_zip, "r") as zf:
             for member in zf.infolist():
-                # Check for traversal
                 target_path = os.path.abspath(os.path.join(extract_to, member.filename))
                 if not target_path.startswith(os.path.abspath(extract_to)):
                     raise ValueError(f"Malicious zip member detected with path traversal: {member.filename}")
-                zf.extract(member, extract_to)
+
+                validate_path_component_lengths(member.filename)
+
+                if member.is_dir() or member.filename.endswith("/"):
+                    safe_makedirs(target_path, exist_ok=True)
+                else:
+                    safe_makedirs(os.path.dirname(target_path), exist_ok=True)
+                    try:
+                        with zf.open(member) as source, safe_open(target_path, "wb") as target:
+                            shutil.copyfileobj(source, target)
+                    except OSError as os_err:
+                        diag = format_path_error_diagnostic(target_path, "extract_zip_member", os_err)
+                        raise OSError(f"{diag['code']}: {os_err}") from os_err
 
     def _find_pbip_root(self, root_dir: str) -> Optional[str]:
         """Searches root_dir recursively for a .pbip file."""
-        for dirpath, _, filenames in os.walk(root_dir):
+        ext_root = to_extended_path(root_dir)
+        for dirpath, _, filenames in os.walk(ext_root):
             for f in filenames:
                 if f.endswith(".pbip") and not f.startswith("."):
-                    return dirpath
+                    return strip_extended_prefix(dirpath)
         return None
 
 

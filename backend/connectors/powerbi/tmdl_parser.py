@@ -12,6 +12,7 @@ import os
 import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Any, Tuple
+from backend.ingestion.paths import safe_open
 
 
 def unquote_identifier(ident: str) -> str:
@@ -769,7 +770,7 @@ class TmdlParser:
         # 1. Parse database.tmdl
         db_path = os.path.join(def_dir, "database.tmdl")
         if os.path.exists(db_path):
-            with open(db_path, "r", encoding="utf-8", errors="replace") as f:
+            with safe_open(db_path, "r", encoding="utf-8", errors="replace") as f:
                 db_props = cls.parse_database_file(f.read())
                 model.compatibility_level = db_props.get("compatibility_level")
                 model.properties.update(db_props)
@@ -777,7 +778,7 @@ class TmdlParser:
         # 2. Parse model.tmdl
         model_path = os.path.join(def_dir, "model.tmdl")
         if os.path.exists(model_path):
-            with open(model_path, "r", encoding="utf-8", errors="replace") as f:
+            with safe_open(model_path, "r", encoding="utf-8", errors="replace") as f:
                 parsed_model = cls.parse_model_file(f.read())
                 model.name = parsed_model.name
                 model.culture = parsed_model.culture
@@ -789,13 +790,13 @@ class TmdlParser:
         # 3. Parse relationships.tmdl
         rel_path = os.path.join(def_dir, "relationships.tmdl")
         if os.path.exists(rel_path):
-            with open(rel_path, "r", encoding="utf-8", errors="replace") as f:
+            with safe_open(rel_path, "r", encoding="utf-8", errors="replace") as f:
                 model.relationships = cls.parse_relationships_file(f.read())
                 
         # 4. Parse expressions.tmdl
         expr_path = os.path.join(def_dir, "expressions.tmdl")
         if os.path.exists(expr_path):
-            with open(expr_path, "r", encoding="utf-8", errors="replace") as f:
+            with safe_open(expr_path, "r", encoding="utf-8", errors="replace") as f:
                 model.expressions = cls.parse_expressions_file(f.read())
                 
         # 5. Parse tables/*.tmdl
@@ -804,7 +805,7 @@ class TmdlParser:
             for fname in sorted(os.listdir(tables_dir)):
                 if fname.endswith(".tmdl"):
                     t_path = os.path.join(tables_dir, fname)
-                    with open(t_path, "r", encoding="utf-8", errors="replace") as f:
+                    with safe_open(t_path, "r", encoding="utf-8", errors="replace") as f:
                         tbl = cls.parse_table_file(f.read())
                         model.tables[tbl.name] = tbl
                         

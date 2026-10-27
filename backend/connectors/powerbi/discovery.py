@@ -14,6 +14,7 @@ from pathlib import Path
 
 from backend.connectors.base import ArtifactManifestItem, Diagnostic, DiagnosticSeverity
 from backend.connectors.powerbi.jsonc_parser import parse_jsonc_file
+from backend.ingestion.paths import safe_open, to_extended_path, strip_extended_prefix
 
 
 @dataclass
@@ -30,9 +31,9 @@ class PbipProjectStructure:
 
 
 def compute_file_sha256(filepath: str) -> str:
-    """Computes sha256 checksum of a file on disk."""
+    """Computes sha256 checksum of a file on disk with long path support."""
     hasher = hashlib.sha256()
-    with open(filepath, "rb") as f:
+    with safe_open(filepath, "rb") as f:
         while chunk := f.read(65536):
             hasher.update(chunk)
     return hasher.hexdigest()
@@ -56,6 +57,12 @@ def detect_artifact_type(relative_path: str) -> Tuple[str, Optional[str], bool]:
         return "PBISM_MODEL_DEFINITION", "application/json", True
     if base == "report.json":
         return "REPORT_LAYOUT", "application/json", True
+    if base == "page.json":
+        return "PBIR_PAGE_DEFINITION", "application/json", True
+    if base == "visual.json":
+        return "PBIR_VISUAL_DEFINITION", "application/json", True
+    if base == "pages.json":
+        return "PBIR_PAGES_METADATA", "application/json", True
     if base == "diagramlayout.json":
         return "DIAGRAM_LAYOUT", "application/json", True
     if norm.endswith(".tmdl"):
@@ -223,9 +230,11 @@ class PbipDiscovery:
 
         # Scan all files in project root to build artifact manifest
         artifact_items: List[ArtifactManifestItem] = []
-        for root, dirs, files in os.walk(project_root):
+        ext_project_root = to_extended_path(project_root)
+        for root, dirs, files in os.walk(ext_project_root):
+            norm_root = strip_extended_prefix(root)
             for fname in sorted(files):
-                full_path = os.path.join(root, fname)
+                full_path = os.path.join(norm_root, fname)
                 rel_path = os.path.relpath(full_path, project_root).replace("\\", "/")
                 
                 # Check path traversal / symlink escape
@@ -240,7 +249,7 @@ class PbipDiscovery:
                     continue
 
                 try:
-                    size = os.path.getsize(full_path)
+                    size = os.path.getsize(to_extended_path(full_path))
                     chash = compute_file_sha256(full_path)
                     art_type, mime, is_supp = detect_artifact_type(rel_path)
                     artifact_items.append(ArtifactManifestItem(
