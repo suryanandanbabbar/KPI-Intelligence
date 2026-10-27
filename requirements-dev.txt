@@ -1,0 +1,5 @@
+# KPI Intelligence — Development & Extended Tooling Dependencies
+-r requirements.txt
+
+# Optional: Live PostgreSQL 15+ Adapter (for live DB scripts: scripts/migrate_postgres_to_cosmos.py & validate_canonical_model.py)
+psycopg2-binary>=2.9.9,<3.0.0
