@@ -188,6 +188,132 @@ class TestAzureLlamaIntegration(unittest.TestCase):
         expected = "https://my-foundry-resource.openai.azure.com/openai/deployments/llama-33-deployment/chat/completions?api-version=2024-06-01"
         self.assertEqual(url, expected)
 
+    def test_client_url_construction_azure_ai_foundry_root(self):
+        """Tests Azure AI Foundry root endpoint routes to /models/chat/completions without bogus api-version."""
+        config = AzureLlamaConfig(
+            azure_endpoint="https://my-resource.services.ai.azure.com",
+            azure_deployment="llama-3.3-70b-instruct",
+            azure_llamakey="test-key",
+        )
+        client = AzureLlamaClient(config)
+        url = client.build_request_url()
+        self.assertEqual(url, "https://my-resource.services.ai.azure.com/models/chat/completions")
+        self.assertNotIn("/openai/deployments", url)
+        self.assertNotIn("api-version", url)
+
+    def test_client_url_construction_azure_ai_foundry_ignores_azure_openai_api_version_2024_06_01(self):
+        """Verifies Azure OpenAI api-version 2024-06-01 is not appended to Foundry model inference routes."""
+        config = AzureLlamaConfig(
+            azure_endpoint="https://my-resource.services.ai.azure.com",
+            azure_deployment="llama-3.3-70b-instruct",
+            azure_llamakey="test-key",
+            azure_openai_api_version="2024-06-01",
+        )
+        client = AzureLlamaClient(config)
+        url = client.build_request_url()
+        self.assertEqual(url, "https://my-resource.services.ai.azure.com/models/chat/completions")
+        self.assertNotIn("2024-06-01", url)
+
+    def test_client_url_construction_azure_ai_foundry_trailing_slash(self):
+        """Tests Azure AI Foundry endpoint with trailing slash handles normalization properly."""
+        config = AzureLlamaConfig(
+            azure_endpoint="https://my-resource.services.ai.azure.com/",
+            azure_deployment="llama-3.3-70b-instruct",
+            azure_llamakey="test-key",
+        )
+        client = AzureLlamaClient(config)
+        url = client.build_request_url()
+        self.assertEqual(url, "https://my-resource.services.ai.azure.com/models/chat/completions")
+
+    def test_client_url_construction_azure_ai_foundry_models_path_no_duplicate(self):
+        """Tests Azure AI Foundry endpoint with /models does NOT produce /models/models/ duplicate."""
+        for ep in ("https://my-resource.services.ai.azure.com/models", "https://my-resource.services.ai.azure.com/models/"):
+            config = AzureLlamaConfig(
+                azure_endpoint=ep,
+                azure_deployment="llama-3.3-70b-instruct",
+                azure_llamakey="test-key",
+            )
+            client = AzureLlamaClient(config)
+            url = client.build_request_url()
+            self.assertEqual(url, "https://my-resource.services.ai.azure.com/models/chat/completions")
+            self.assertNotIn("/models/models/", url)
+
+    def test_client_url_construction_azure_ai_foundry_v1_path(self):
+        """Tests Azure AI Foundry endpoint with /v1 produces /v1/chat/completions."""
+        config = AzureLlamaConfig(
+            azure_endpoint="https://my-resource.services.ai.azure.com/v1",
+            azure_deployment="llama-3.3-70b-instruct",
+            azure_llamakey="test-key",
+        )
+        client = AzureLlamaClient(config)
+        url = client.build_request_url()
+        self.assertEqual(url, "https://my-resource.services.ai.azure.com/v1/chat/completions")
+
+    def test_client_url_construction_azure_ai_foundry_full_completions_path(self):
+        """Tests direct chat completions path is preserved without alteration."""
+        config = AzureLlamaConfig(
+            azure_endpoint="https://my-resource.services.ai.azure.com/models/chat/completions",
+            azure_deployment="llama-3.3-70b-instruct",
+            azure_llamakey="test-key",
+        )
+        client = AzureLlamaClient(config)
+        url = client.build_request_url()
+        self.assertEqual(url, "https://my-resource.services.ai.azure.com/models/chat/completions")
+
+    def test_client_url_construction_azure_openai_existing_deployments_path_no_duplicate(self):
+        """Tests Azure OpenAI endpoint with existing /deployments path does not duplicate route segments."""
+        config = AzureLlamaConfig(
+            azure_endpoint="https://res.openai.azure.com/openai/deployments/existing-llama-dep",
+            azure_deployment_name="fallback-name",
+            azure_llamakey="test-key",
+            azure_openai_api_version="2024-06-01",
+        )
+        client = AzureLlamaClient(config)
+        url = client.build_request_url()
+        expected = "https://res.openai.azure.com/openai/deployments/existing-llama-dep/chat/completions?api-version=2024-06-01"
+        self.assertEqual(url, expected)
+        self.assertNotIn("/openai/deployments/existing-llama-dep/openai/deployments", url)
+
+    def test_client_url_construction_azure_cognitive_services(self):
+        """Tests Azure Cognitive Services endpoint formatting."""
+        config = AzureLlamaConfig(
+            azure_endpoint="https://my-cog.cognitiveservices.azure.com",
+            azure_deployment_name="llama-dep",
+            azure_llamakey="test-key",
+        )
+        client = AzureLlamaClient(config)
+        url = client.build_request_url()
+        expected = "https://my-cog.cognitiveservices.azure.com/openai/deployments/llama-dep/chat/completions?api-version=2024-06-01"
+        self.assertEqual(url, expected)
+
+    def test_client_url_construction_custom_openai_compatible(self):
+        """Tests custom/local OpenAI compatible endpoint formatting."""
+        config = AzureLlamaConfig(
+            azure_endpoint="http://localhost:8000/v1",
+            azure_deployment="local-llama",
+            azure_llamakey="test-key",
+        )
+        client = AzureLlamaClient(config)
+        url = client.build_request_url()
+        self.assertEqual(url, "http://localhost:8000/v1/chat/completions")
+
+    def test_endpoint_classification(self):
+        """Tests endpoint classification logic."""
+        c1 = AzureLlamaClient(AzureLlamaConfig(azure_endpoint="https://a.openai.azure.com", azure_llamakey="k", azure_deployment="d"))
+        self.assertEqual(c1.classify_endpoint(), "Azure OpenAI")
+
+        c2 = AzureLlamaClient(AzureLlamaConfig(azure_endpoint="https://b.services.ai.azure.com", azure_llamakey="k", azure_deployment="d"))
+        self.assertEqual(c2.classify_endpoint(), "Azure AI Foundry / Model Inference")
+
+        c3 = AzureLlamaClient(AzureLlamaConfig(azure_endpoint="https://llama.eastus2.models.ai.azure.com", azure_llamakey="k", azure_deployment="d"))
+        self.assertEqual(c3.classify_endpoint(), "Azure AI Foundry / Model Inference")
+
+        c4 = AzureLlamaClient(AzureLlamaConfig(azure_endpoint="https://c.cognitiveservices.azure.com", azure_llamakey="k", azure_deployment="d"))
+        self.assertEqual(c4.classify_endpoint(), "Azure Cognitive Services")
+
+        c5 = AzureLlamaClient(AzureLlamaConfig(azure_endpoint="http://localhost:8000/v1", azure_llamakey="k", azure_deployment="d"))
+        self.assertEqual(c5.classify_endpoint(), "OpenAI-compatible")
+
     def test_client_url_construction_direct_models_style(self):
         """Tests Azure AI Model Inference endpoint formatting when /models path is used."""
         config = AzureLlamaConfig(
@@ -738,6 +864,65 @@ class TestAzureLlamaIntegration(unittest.TestCase):
         err_msg = str(ctx.exception)
         self.assertNotIn(secret_token, err_msg)
         self.assertIn("[REDACTED]", err_msg)
+
+
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_urllib_http_error_404_no_retry_actionable_diagnostics(self, mock_urlopen, mock_sleep):
+        """Verifies HTTP 404 does NOT retry, fast-fails with category HTTP_ERROR, and provides actionable diagnostics."""
+        secret_key = "secret-azure-key-12345"
+        config = AzureLlamaConfig(
+            azure_endpoint="https://my-foundry.services.ai.azure.com",
+            azure_deployment="llama-3.3-70b-instruct",
+            azure_llamakey=secret_key,
+            max_retries=3,
+        )
+        client = AzureLlamaClient(config)
+
+        error_fp = io.BytesIO(b'{"error": {"code": "ResourceNotFound", "message": "The specified resource was not found."}}')
+        http_err = urllib.error.HTTPError(
+            url="https://my-foundry.services.ai.azure.com/models/chat/completions",
+            code=404,
+            msg="Not Found",
+            hdrs={},
+            fp=error_fp,
+        )
+        mock_urlopen.side_effect = http_err
+
+        with self.assertRaises(AzureLlamaClientError) as ctx:
+            client.generate_chat_completion("sys", "user")
+
+        # 1. Assert no retries attempted
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_sleep.assert_not_called()
+
+        # 2. Assert category and status code
+        self.assertEqual(ctx.exception.category, "HTTP_ERROR")
+        self.assertEqual(ctx.exception.status_code, 404)
+
+        # 3. Assert actionable guidance and diagnostics
+        err_msg = str(ctx.exception)
+        self.assertIn("HTTP 404", err_msg)
+        self.assertIn("Actionable guidance", err_msg)
+        self.assertIn("AZURE_ENDPOINT", err_msg)
+        self.assertIn("/models/chat/completions", err_msg)
+
+        # 4. Assert secrets are never leaked
+        self.assertNotIn(secret_key, err_msg)
+
+    def test_build_headers_structure(self):
+        """Verifies build_headers generates correct auth headers with secret key."""
+        config = AzureLlamaConfig(
+            azure_endpoint="https://my-foundry.services.ai.azure.com",
+            azure_deployment="llama-3.3-70b",
+            azure_llamakey="my-test-key-abc",
+        )
+        client = AzureLlamaClient(config)
+        headers = client.build_headers()
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(headers["api-key"], "my-test-key-abc")
+        self.assertEqual(headers["Authorization"], "Bearer my-test-key-abc")
+        self.assertEqual(headers["User-Agent"], "KPI-Intelligence-AzureLlama/1.0")
 
 
 if __name__ == "__main__":

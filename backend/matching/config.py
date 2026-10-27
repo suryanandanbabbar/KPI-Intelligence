@@ -154,13 +154,24 @@ class AzureLlamaConfig:
     def to_safe_dict(self) -> Dict[str, Any]:
         """Returns non-sensitive metadata safe for logs, diagnostics, and frontend API responses."""
         safe_endpoint = None
+        endpoint_type = "Unconfigured"
         if self.azure_endpoint:
             # Mask hostname keeping only protocol and domain suffix
             safe_endpoint = re.sub(r"://([^/]+)", "://[REDACTED_HOST]", self.azure_endpoint)
+            endpoint_lower = self.azure_endpoint.lower()
+            if "openai.azure.com" in endpoint_lower:
+                endpoint_type = "Azure OpenAI"
+            elif "services.ai.azure.com" in endpoint_lower or "ai.azure.com" in endpoint_lower:
+                endpoint_type = "Azure AI Foundry / Model Inference"
+            elif "cognitiveservices.azure.com" in endpoint_lower:
+                endpoint_type = "Azure Cognitive Services"
+            else:
+                endpoint_type = "Custom / OpenAI-compatible"
 
         return {
             "llm_configured": self.is_configured,
             "llm_provider": "Azure AI Foundry (Llama)",
+            "endpoint_type": endpoint_type,
             "llm_deployment": self.azure_deployment,
             "llm_deployment_name": self.azure_deployment_name,
             "effective_deployment": self.effective_deployment_name,

@@ -340,7 +340,9 @@ AZURE_DEPLOYMENT=llama-3.3-70b-instruct
 AZURE_ENDPOINT=https://<your-resource>.services.ai.azure.com/
 AZURE_LLAMAKEY=<your-api-key>
 AZURE_DEPLOYMENT_NAME=llama-33-70b-deployment
-AZURE_OPENAI_API_VERSION=2024-06-01
+# Note: For Azure AI Foundry Model Inference, leave AZURE_OPENAI_API_VERSION empty or set to 2024-05-01-preview.
+# Do NOT set AZURE_OPENAI_API_VERSION=2024-06-01 on services.ai.azure.com endpoints.
+AZURE_OPENAI_API_VERSION=
 ```
 
 ### Step 4: Frontend Setup
@@ -653,6 +655,16 @@ The FastAPI backend provides 31 documented endpoints organized by operational do
      # SSL_CERT_FILE=C:\path\to\corporate_ca_bundle.pem
      ```
   3. Certificate verification is strictly maintained for enterprise security; the client fails fast without retrying and provides actionable diagnostic remediation.
+
+### 8. Azure AI Foundry HTTP 404 (`Resource Not Found`)
+- **Symptom**: Azure LLM requests fail with `Azure LLM resource not found (HTTP 404)`.
+- **Diagnostic**: The URL route does not reach a valid Azure resource or API deployment.
+  1. **Azure AI Foundry Model Inference endpoints** (`services.ai.azure.com` / `ai.azure.com`): Expect route `/models/chat/completions` with the model identifier specified in the JSON body (`model`). Setting `AZURE_OPENAI_API_VERSION=2024-06-01` will cause a 404 because `2024-06-01` is an Azure OpenAI API version not supported by Foundry Model Inference.
+  2. **Azure OpenAI endpoints** (`openai.azure.com` / `cognitiveservices.azure.com`): Expect route `/openai/deployments/{deployment_name}/chat/completions?api-version=2024-06-01`.
+- **Resolution**:
+  - For Azure AI Foundry: Set `AZURE_ENDPOINT=https://<your-resource>.services.ai.azure.com/` (or `/models`), ensure `AZURE_DEPLOYMENT` matches the model/deployment name in your Foundry project, and leave `AZURE_OPENAI_API_VERSION` blank or set to `2024-05-01-preview`.
+  - For Azure OpenAI: Set `AZURE_ENDPOINT=https://<your-resource>.openai.azure.com/`, set `AZURE_DEPLOYMENT_NAME` to your deployment name, and set `AZURE_OPENAI_API_VERSION=2024-06-01`.
+  - The client logs safe diagnostic information (`endpoint_type`, `host`, `path`, `deployment`) and fast-fails without repeatedly retrying deterministic 404 errors.
 
 ---
 

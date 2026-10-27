@@ -57,13 +57,39 @@ class AzureLlamaClient:
     def __init__(self, config: Optional[AzureLlamaConfig] = None):
         self.config = config or AzureLlamaConfig.from_env()
 
+    def classify_endpoint(self) -> str:
+        """Sanitized endpoint classification for diagnostics and route selection."""
+        endpoint = (self.config.azure_endpoint or "").strip().lower()
+        if not endpoint:
+            return "Unconfigured"
+        parsed = urlparse(endpoint)
+        netloc = parsed.netloc.lower()
+        if "openai.azure.com" in netloc:
+            return "Azure OpenAI"
+        if "services.ai.azure.com" in netloc or "ai.azure.com" in netloc:
+            return "Azure AI Foundry / Model Inference"
+        if "cognitiveservices.azure.com" in netloc:
+            return "Azure Cognitive Services"
+        return "OpenAI-compatible"
+
     def build_request_url(self) -> str:
         """
-        Constructs the target Azure AI Foundry chat completions URL.
-        Preserves path if already specified in AZURE_ENDPOINT; otherwise formats
-        the Azure OpenAI or Azure AI Model Inference route.
+        Constructs the target Azure AI Foundry or Azure OpenAI chat completions URL.
+        
+        Properly resolves and normalizes:
+        1. Full chat completions endpoints (e.g. https://.../chat/completions)
+        2. Azure AI Foundry endpoints (*.services.ai.azure.com, *.ai.azure.com, *.models.ai.azure.com, *.inference.ai.azure.com)
+           - Resource root: https://res.services.ai.azure.com -> https://res.services.ai.azure.com/models/chat/completions
+           - Explicit /models: https://res.services.ai.azure.com/models -> https://res.services.ai.azure.com/models/chat/completions (no duplicate /models)
+           - Explicit /v1: https://res.services.ai.azure.com/v1 -> https://res.services.ai.azure.com/v1/chat/completions
+           - Explicit /deployments/: preserves path and appends /chat/completions
+        3. Azure OpenAI endpoints (*.openai.azure.com)
+           - Resource root: https://res.openai.azure.com -> https://res.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version=...
+           - Explicit deployment: https://res.openai.azure.com/openai/deployments/{deployment} -> https://res.openai.azure.com/openai/deployments/{deployment}/chat/completions?api-version=...
+        4. Azure Cognitive Services (*.cognitiveservices.azure.com)
+        5. OpenAI-compatible / Custom endpoints (e.g. http://localhost:8000/v1 -> http://localhost:8000/v1/chat/completions)
         """
-        endpoint = (self.config.azure_endpoint or "").strip().rstrip("/")
+        endpoint = (self.config.azure_endpoint or "").strip()
         if not endpoint:
             raise AzureLlamaClientError(
                 "AZURE_ENDPOINT is empty or not configured.",
@@ -71,27 +97,85 @@ class AzureLlamaClient:
             )
 
         parsed = urlparse(endpoint)
-        base_path = parsed.path.rstrip("/")
+        if not parsed.scheme or not parsed.netloc:
+            raise AzureLlamaClientError(
+                f"AZURE_ENDPOINT '{endpoint}' is not a valid URL.",
+                category="MISSING_CONFIGURATION",
+            )
+
+        base = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+        path = parsed.path.rstrip("/")
+        netloc_lower = parsed.netloc.lower()
+        deployment_name = self.config.effective_deployment_name
+
+        # Parse existing query parameters from the endpoint
         query_params = parse_qs(parsed.query)
 
-        # Append api-version if specified
-        if self.config.azure_openai_api_version:
-            query_params["api-version"] = [self.config.azure_openai_api_version]
+        # 1. Direct full completion path provided
+        if path.endswith("/chat/completions"):
+            resolved_path = path
+            if self.config.azure_openai_api_version and "api-version" not in query_params:
+                query_params["api-version"] = [self.config.azure_openai_api_version]
+            qs = urlencode(query_params, doseq=True)
+            return f"{base}{resolved_path}{'?' + qs if qs else ''}"
 
+        # 2. Azure OpenAI endpoints (*.openai.azure.com)
+        if "openai.azure.com" in netloc_lower:
+            api_ver = self.config.azure_openai_api_version or "2024-06-01"
+            if "api-version" not in query_params:
+                query_params["api-version"] = [api_ver]
+            qs = urlencode(query_params, doseq=True)
+            qs_str = f"?{qs}" if qs else ""
+
+            if "/deployments/" in path:
+                return f"{base}{path}/chat/completions{qs_str}"
+            if path.endswith("/openai/v1") or path.endswith("/v1"):
+                return f"{base}{path}/chat/completions{qs_str}"
+            return f"{base}/openai/deployments/{deployment_name}/chat/completions{qs_str}"
+
+        # 3. Azure AI Foundry / MaaS endpoints (*.services.ai.azure.com, *.ai.azure.com, *.models.ai.azure.com, *.inference.ai.azure.com)
+        if "services.ai.azure.com" in netloc_lower or "ai.azure.com" in netloc_lower:
+            # Azure AI Model Inference API does not use Azure OpenAI date-based versions (e.g. 2024-06-01).
+            # Only include api-version if present in endpoint URL or explicitly specified with a foundry preview version.
+            if self.config.azure_openai_api_version and "api-version" not in query_params:
+                if self.config.azure_openai_api_version != "2024-06-01":
+                    query_params["api-version"] = [self.config.azure_openai_api_version]
+            qs = urlencode(query_params, doseq=True)
+            qs_str = f"?{qs}" if qs else ""
+
+            if "/deployments/" in path:
+                return f"{base}{path}/chat/completions{qs_str}"
+            if path in ("", "/"):
+                return f"{base}/models/chat/completions{qs_str}"
+            if path.endswith("/models"):
+                return f"{base}{path}/chat/completions{qs_str}"
+            if path.endswith("/v1"):
+                return f"{base}{path}/chat/completions{qs_str}"
+            return f"{base}{path}/models/chat/completions{qs_str}"
+
+        # 4. Azure Cognitive Services (*.cognitiveservices.azure.com)
+        if "cognitiveservices.azure.com" in netloc_lower:
+            api_ver = self.config.azure_openai_api_version or "2024-06-01"
+            if "api-version" not in query_params:
+                query_params["api-version"] = [api_ver]
+            qs = urlencode(query_params, doseq=True)
+            qs_str = f"?{qs}" if qs else ""
+
+            if "/deployments/" in path:
+                return f"{base}{path}/chat/completions{qs_str}"
+            return f"{base}/openai/deployments/{deployment_name}/chat/completions{qs_str}"
+
+        # 5. Generic / OpenAI-compatible paths
+        if self.config.azure_openai_api_version and "api-version" not in query_params:
+            query_params["api-version"] = [self.config.azure_openai_api_version]
         qs = urlencode(query_params, doseq=True)
         qs_str = f"?{qs}" if qs else ""
 
-        # Check if endpoint path already points to chat completions
-        if base_path.endswith("/chat/completions"):
-            return f"{parsed.scheme}://{parsed.netloc}{base_path}{qs_str}"
-
-        # If endpoint has /models or is models.ai.azure.com host, route to /models/chat/completions
-        if "/models" in base_path or parsed.netloc.endswith("models.ai.azure.com"):
-            return f"{parsed.scheme}://{parsed.netloc}{base_path}/models/chat/completions{qs_str}"
-
-        # Standard Azure OpenAI / Azure AI Foundry route: /openai/deployments/{deployment}/chat/completions
-        deployment_name = self.config.effective_deployment_name
-        return f"{parsed.scheme}://{parsed.netloc}{base_path}/openai/deployments/{deployment_name}/chat/completions{qs_str}"
+        if path.endswith("/v1") or path.endswith("/models"):
+            return f"{base}{path}/chat/completions{qs_str}"
+        if path in ("", "/"):
+            return f"{base}/v1/chat/completions{qs_str}"
+        return f"{base}{path}/chat/completions{qs_str}"
 
     def build_headers(self) -> Dict[str, str]:
         """Builds secret-authenticated request headers for the Azure endpoint."""
@@ -135,6 +219,20 @@ class AzureLlamaClient:
 
         url = self.build_request_url()
         headers = self.build_headers()
+        parsed_url = urlparse(url)
+        endpoint_type = self.classify_endpoint()
+        req_timeout = float(self.config.timeout_seconds)
+
+        # Safe diagnostic logging (no secrets, keys, or authorization headers logged)
+        logger.info(
+            "Azure LLM request dispatch: method=POST endpoint_type='%s' host='%s' path='%s' "
+            "deployment_configured=%s timeout=%.1fs",
+            endpoint_type,
+            parsed_url.netloc,
+            parsed_url.path,
+            bool(self.config.effective_deployment_name),
+            req_timeout,
+        )
 
         payload: Dict[str, Any] = {
             "model": self.config.effective_model_identifier,
@@ -150,7 +248,6 @@ class AzureLlamaClient:
         # Bounded retries for transient failures
         attempts = 0
         max_attempts = max(1, self.config.max_retries + 1)
-        req_timeout = float(self.config.timeout_seconds)
 
         while attempts < max_attempts:
             attempts += 1
@@ -262,7 +359,31 @@ class AzureLlamaClient:
                         status_code=status_code,
                     ) from he
 
-                # Other HTTP errors (400, 404, etc.)
+                if status_code == 404:
+                    logger.error(
+                        "Azure LLM request returned HTTP 404 (Resource Not Found). "
+                        "Endpoint type: '%s', Host: '%s', Path: '%s', Deployment: '%s', Query: '%s'. "
+                        "Server response: %s",
+                        endpoint_type,
+                        parsed_url.netloc,
+                        parsed_url.path,
+                        self.config.effective_deployment_name or "(none)",
+                        parsed_url.query or "(none)",
+                        sanitized_body[:200] if sanitized_body else "(empty)",
+                    )
+                    raise AzureLlamaClientError(
+                        f"Azure LLM resource not found (HTTP 404) at '{parsed_url.scheme}://{parsed_url.netloc}{parsed_url.path}'. "
+                        f"Endpoint type: '{endpoint_type}'. "
+                        f"Deployment: '{self.config.effective_deployment_name}'. "
+                        "Actionable guidance: Verify your AZURE_ENDPOINT, AZURE_DEPLOYMENT, and AZURE_DEPLOYMENT_NAME. "
+                        "1. For Azure AI Foundry (services.ai.azure.com / ai.azure.com), ensure your model is deployed and target route is '/models/chat/completions'. "
+                        "2. For Azure OpenAI (openai.azure.com / cognitiveservices.azure.com), verify AZURE_DEPLOYMENT_NAME matches your Azure deployment name and AZURE_OPENAI_API_VERSION is valid for your resource. "
+                        f"Server response: {sanitized_body[:200] if sanitized_body else '(empty)'}",
+                        category="HTTP_ERROR",
+                        status_code=404,
+                    ) from he
+
+                # Other HTTP errors (400, etc.)
                 raise AzureLlamaClientError(
                     f"Azure Llama API request failed with HTTP {status_code}: {sanitized_body[:200]}",
                     category="HTTP_ERROR",
