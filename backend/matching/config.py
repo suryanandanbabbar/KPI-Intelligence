@@ -72,8 +72,9 @@ class AzureLlamaConfig:
     azure_openai_api_version: Optional[str] = None
 
     # Operational settings
-    timeout_seconds: float = 30.0
-    max_retries: int = 2
+    timeout_seconds: float = 45.0
+    max_retries: int = 1
+    max_timeout_retries: Optional[int] = None
     retry_backoff_seconds: float = 1.0
 
     @classmethod
@@ -87,8 +88,14 @@ class AzureLlamaConfig:
         deployment_name = cls._clean_env("AZURE_DEPLOYMENT_NAME")
         api_version = cls._clean_env("AZURE_OPENAI_API_VERSION")
 
-        timeout = float(os.getenv("KPI_LLM_TIMEOUT_SECONDS", "30.0"))
-        max_retries = int(os.getenv("KPI_LLM_MAX_RETRIES", "2"))
+        timeout_env = os.getenv("AZURE_LLM_TIMEOUT_SECONDS") or os.getenv("KPI_LLM_TIMEOUT_SECONDS")
+        timeout = float(timeout_env) if timeout_env else 45.0
+
+        retries_env = os.getenv("AZURE_LLM_MAX_RETRIES") or os.getenv("KPI_LLM_MAX_RETRIES")
+        max_retries = int(retries_env) if retries_env else 1
+
+        timeout_retries_env = os.getenv("AZURE_LLM_MAX_TIMEOUT_RETRIES") or os.getenv("KPI_LLM_MAX_TIMEOUT_RETRIES")
+        max_timeout_retries = int(timeout_retries_env) if timeout_retries_env else 0
 
         return cls(
             azure_deployment=deployment,
@@ -98,6 +105,7 @@ class AzureLlamaConfig:
             azure_openai_api_version=api_version,
             timeout_seconds=timeout,
             max_retries=max_retries,
+            max_timeout_retries=max_timeout_retries,
         )
 
     @staticmethod
@@ -126,6 +134,16 @@ class AzureLlamaConfig:
     def effective_model_identifier(self) -> str:
         """Returns the model identifier for the request payload."""
         return self.azure_deployment or self.azure_deployment_name or "llama"
+
+    @property
+    def effective_max_timeout_retries(self) -> int:
+        """
+        Returns effective timeout retries.
+        Defaults to max_timeout_retries if set; otherwise falls back to max_retries.
+        """
+        if self.max_timeout_retries is not None:
+            return max(0, self.max_timeout_retries)
+        return max(0, self.max_retries)
 
     def validate(self) -> None:
         """
@@ -181,6 +199,7 @@ class AzureLlamaConfig:
             "safe_endpoint": safe_endpoint,
             "timeout_seconds": self.timeout_seconds,
             "max_retries": self.max_retries,
+            "max_timeout_retries": self.effective_max_timeout_retries,
         }
 
     def __repr__(self) -> str:

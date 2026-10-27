@@ -77,19 +77,24 @@ class MatchingOrchestrator:
 
         # ---------------------------------------------------------------------
         # Stage A: Candidate Retrieval
+        import time as _pytime
+        t_stage7_start = _pytime.time()
+
+        # ---------------------------------------------------------------------
+        # Stage A: Candidate Retrieval (Bounded to top 8 candidates to avoid oversized prompts)
         # ---------------------------------------------------------------------
         field_name = metadata_field.get("name") or metadata_field.get("candidate_name") or ""
         field_expr = metadata_field.get("expression") or metadata_field.get("candidate_expression") or ""
         query_text = f"{field_name} {field_expr}".strip()
 
         # Retrieve candidates in target domain (and also general candidates)
-        pool = self.kpi_bank.search(query=query_text, domain=domain, limit=20)
+        pool = self.kpi_bank.search(query=query_text, domain=domain, limit=8)
         if not pool and domain:
-            pool = self.kpi_bank.search(query=query_text, domain=None, limit=15)
+            pool = self.kpi_bank.search(query=query_text, domain=None, limit=8)
         if not pool:
-            pool = self.kpi_bank.list_all(domain=domain)[:10]
+            pool = self.kpi_bank.list_all(domain=domain)[:8]
         if not pool:
-            pool = self.kpi_bank.list_all()[:10]
+            pool = self.kpi_bank.list_all()[:8]
 
         if not pool:
             # Explicit no-match outcome
@@ -103,6 +108,7 @@ class MatchingOrchestrator:
                 "top_candidates": [],
                 "started_at": started_at,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
+                "ranking_duration_ms": round((_pytime.time() - t_stage7_start) * 1000, 2),
             }
 
         # ---------------------------------------------------------------------
@@ -151,6 +157,15 @@ class MatchingOrchestrator:
                 c["fallback_reason"] = fallback_reason
 
         completed_at = datetime.now(timezone.utc).isoformat()
+        ranking_duration_ms = round((_pytime.time() - t_stage7_start) * 1000, 2)
+        logger.info(
+            "Stage 7/9 [CANDIDATE_RANKING]: Field '%s' candidate ranking complete in %.2fms (engine=%s, fallback=%s, candidates=%d)",
+            field_name,
+            ranking_duration_ms,
+            matching_engine,
+            fallback_used,
+            len(top_candidates),
+        )
 
         return {
             "input_fingerprint": fingerprint,
@@ -162,6 +177,7 @@ class MatchingOrchestrator:
             "top_candidates": top_candidates,
             "started_at": started_at,
             "completed_at": completed_at,
+            "ranking_duration_ms": ranking_duration_ms,
         }
 
 

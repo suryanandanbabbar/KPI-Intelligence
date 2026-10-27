@@ -247,7 +247,9 @@ class AzureLlamaClient:
 
         # Bounded retries for transient failures
         attempts = 0
+        timeout_attempts = 0
         max_attempts = max(1, self.config.max_retries + 1)
+        max_timeout_attempts = max(1, self.config.effective_max_timeout_retries + 1)
 
         while attempts < max_attempts:
             attempts += 1
@@ -413,13 +415,14 @@ class AzureLlamaClient:
                         category="CLIENT_INITIALIZATION_FAILED",
                     ) from ue
 
-                # 2. Timeout error -> Bounded retry with backoff
+                # 2. Timeout error -> Bounded retry with backoff (controlled by effective_max_timeout_retries)
                 is_timeout = (
                     isinstance(reason, (TimeoutError, socket.timeout))
                     or "timed out" in reason_str.lower()
                 )
                 if is_timeout:
-                    if attempts < max_attempts:
+                    timeout_attempts += 1
+                    if timeout_attempts < max_timeout_attempts and attempts < max_attempts:
                         delay = min(10.0, self.config.retry_backoff_seconds * (2 ** (attempts - 1)))
                         logger.warning(
                             "Azure Llama request timed out (attempt %d/%d). Backing off %.1fs.",

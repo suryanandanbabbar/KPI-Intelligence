@@ -76,6 +76,17 @@ class LLMMatchingEngine:
             metadata_field, kpi_candidates, domain, historical_overrides
         )
 
+        import time as _pytime
+        t_req_start = _pytime.time()
+        field_label = metadata_field.get("name") or metadata_field.get("candidate_name") or metadata_field.get("field_id", "field")
+
+        logger.info(
+            "Stage 4/9 [LLM_REQUEST_STARTED]: Dispatching semantic ranking for field '%s' (candidate_pool=%d, deployment='%s')",
+            field_label,
+            len(kpi_candidates),
+            self.model_name,
+        )
+
         try:
             if self.provider_fn:
                 # Custom mock or legacy test provider
@@ -86,6 +97,7 @@ class LLMMatchingEngine:
                     system_prompt=system_prompt,
                     user_prompt=user_prompt,
                     temperature=0.0,
+                    max_tokens=1024,
                 )
             else:
                 raise LLMMatchingError(
@@ -93,15 +105,41 @@ class LLMMatchingEngine:
                     category="CLIENT_INITIALIZATION_FAILED",
                 )
         except AzureLlamaClientError as az_err:
-            logger.warning("Azure Llama client failed [%s]: %s", az_err.category, az_err.message)
+            elapsed = _pytime.time() - t_req_start
+            logger.warning(
+                "Azure Llama client failed [%s] after %.2fs for field '%s': %s",
+                az_err.category,
+                elapsed,
+                field_label,
+                az_err.message,
+            )
             raise LLMMatchingError(az_err.message, category=az_err.category) from az_err
         except LLMMatchingError:
             raise
         except Exception as ex:
-            logger.warning("LLM provider execution failed: %s", ex)
+            elapsed = _pytime.time() - t_req_start
+            logger.warning("LLM provider execution failed after %.2fs for field '%s': %s", elapsed, field_label, ex)
             raise LLMMatchingError(f"LLM execution error: {ex}", category="HTTP_ERROR") from ex
 
+        t_resp_received = _pytime.time()
+        req_duration_ms = round((t_resp_received - t_req_start) * 1000, 2)
+        logger.info(
+            "Stage 5/9 [LLM_RESPONSE_RECEIVED]: Field '%s' received model response in %.2fms (deployment='%s')",
+            field_label,
+            req_duration_ms,
+            self.model_name,
+        )
+
+        t_parse_start = _pytime.time()
         parsed = self._parse_and_validate_response(raw_response, valid_kpi_ids, max_candidates)
+        t_parse_end = _pytime.time()
+        parse_duration_ms = round((t_parse_end - t_parse_start) * 1000, 2)
+        logger.info(
+            "Stage 6/9 [RESPONSE_PARSING_VALIDATION]: Field '%s' parsed & validated %d candidates in %.2fms",
+            field_label,
+            len(parsed),
+            parse_duration_ms,
+        )
         return parsed
 
     def _build_prompts(

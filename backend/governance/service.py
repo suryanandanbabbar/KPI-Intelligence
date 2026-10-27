@@ -17,6 +17,7 @@ Orchestrates:
 6. Real-time Workspace Metrics and Audit History.
 """
 
+import os
 import uuid
 import logging
 from typing import Dict, List, Optional, Any
@@ -236,28 +237,73 @@ class GovernanceService:
         import time as _pytime
         t0 = _pytime.time()
         logger.info(
-            "Pipeline execution initiated: tenant=%s, user=%s, force_fallback=%s",
+            "Stage 1/9 [REQUEST_RECEIVED]: Mapping pipeline initiated: tenant=%s, user=%s, force_fallback=%s",
             tenant_id,
             user_id,
             force_fallback,
         )
 
         ctx = TenantContext(tenant_id=tenant_id)
+
+        # Stage 2: Canonical Metadata Extraction
+        t_start_canonical = _pytime.time()
         fields = self.extract_canonical_metadata_fields(tenant_id)
+        t_canonical_loaded = _pytime.time()
+        canonical_duration_ms = round((t_canonical_loaded - t_start_canonical) * 1000, 2)
+        total_fields = len(fields)
+        logger.info(
+            "Stage 2/9 [CANONICAL_LOADED]: %d canonical metadata fields loaded in %.2fms for tenant %s",
+            total_fields,
+            canonical_duration_ms,
+            tenant_id,
+        )
+
+        # Stage 3: Domain Segregation & Boundary Verification
+        t_start_domain = _pytime.time()
+        domain_distribution: Dict[str, int] = {}
+        for f in fields:
+            dom = f.get("domain", "GENERAL")
+            domain_distribution[dom] = domain_distribution.get(dom, 0) + 1
+        t_domain_segregated = _pytime.time()
+        domain_duration_ms = round((t_domain_segregated - t_start_domain) * 1000, 2)
+        logger.info(
+            "Stage 3/9 [DOMAIN_SEGREGATION]: %d domains segregated across %d fields in %.2fms: %s",
+            len(domain_distribution),
+            total_fields,
+            domain_duration_ms,
+            domain_distribution,
+        )
 
         run_id = f"run_{uuid.uuid4()}"
         started_at = datetime.now(timezone.utc).isoformat()
-        total_fields = len(fields)
         auto_reused_count = 0
         llm_processed_count = 0
         fallback_processed_count = 0
         mappings_produced: List[Dict[str, Any]] = []
 
-        logger.info("Loaded %d canonical metadata fields for tenant %s", total_fields, tenant_id)
+        # Circuit breaker and total execution budget controls
+        llm_circuit_open = False
+        llm_circuit_reason: Optional[str] = None
+        pipeline_budget_seconds = float(os.getenv("KPI_PIPELINE_TOTAL_BUDGET_SECONDS", "90.0"))
+        total_ranking_time_ms = 0.0
 
-        for field in fields:
+        for idx, field in enumerate(fields):
             field_id = field["field_id"]
             field_domain = field["domain"]
+            elapsed_so_far = _pytime.time() - t0
+
+            # Guard against exceeding total execution budget
+            # If remaining budget is less than 15s, trip circuit to guarantee timely completion
+            if elapsed_so_far >= (pipeline_budget_seconds - 15.0) and not llm_circuit_open and not force_fallback:
+                llm_circuit_open = True
+                llm_circuit_reason = (
+                    f"PIPELINE_BUDGET_REACHED: Elapsed time ({elapsed_so_far:.1f}s) reached threshold of "
+                    f"{pipeline_budget_seconds:.1f}s budget. Fast-falling back remaining fields."
+                )
+                logger.warning(llm_circuit_reason)
+
+            # Determine whether to execute deterministic fallback for this field
+            field_force_fallback = force_fallback or llm_circuit_open
 
             # 1. Check Learning Service for reusable override
             override_match = self.learning_service.find_reusable_override(tenant_id, field, self.kpi_bank)
@@ -293,12 +339,31 @@ class GovernanceService:
                 mappings_produced.append(mapping_doc.to_dict())
                 continue
 
-            # 2. Invoke Matching Orchestrator
+            # 2. Invoke Matching Orchestrator (Stages 4-7)
+            t_field_rank_start = _pytime.time()
             match_res = self.matcher.discover_and_rank_candidates(
                 metadata_field=field,
                 domain=field_domain,
-                force_fallback=force_fallback,
+                force_fallback=field_force_fallback,
             )
+            t_field_rank_end = _pytime.time()
+            total_ranking_time_ms += (t_field_rank_end - t_field_rank_start) * 1000
+
+            # If an unforced LLM failure or timeout occurred, trip circuit breaker for remaining fields
+            if match_res["fallback_used"] and not force_fallback and not llm_circuit_open:
+                fallback_reason_str = match_res.get("fallback_reason") or ""
+                # Trip circuit on persistent infrastructural/timeout issues
+                is_circuit_trigger = any(
+                    trigger in fallback_reason_str
+                    for trigger in ("TIMEOUT", "HTTP_ERROR", "CLIENT_INITIALIZATION_FAILED", "MISSING_CONFIGURATION", "503", "429")
+                )
+                if is_circuit_trigger:
+                    llm_circuit_open = True
+                    llm_circuit_reason = (
+                        f"CIRCUIT_BREAKER_TRIPPED: Field '{field['name']}' encountered {fallback_reason_str}. "
+                        "Fast-failover to deterministic matching enabled for subsequent fields in this run."
+                    )
+                    logger.warning(llm_circuit_reason)
 
             if match_res["fallback_used"]:
                 fallback_processed_count += 1
@@ -340,31 +405,43 @@ class GovernanceService:
             self.repo.upsert_item(CosmosContainer.KPI_GOVERNANCE, tenant_id, mapping_doc.to_dict(), ctx)
             mappings_produced.append(mapping_doc.to_dict())
 
+        # Stage 8: Persistence
+        t_start_persist = _pytime.time()
         completed_at = datetime.now(timezone.utc).isoformat()
         duration = round(_pytime.time() - t0, 2)
 
-        # 3. Persist Mapping Run Record
         run_doc = KpiMappingRunDocument(
             id=run_id,
             mapping_run_id=run_id,
             tenant_id=tenant_id,
-            primary_engine="LLM_INFERENCE",
+            primary_engine="LLM_INFERENCE" if llm_processed_count > 0 else "DETERMINISTIC_FALLBACK",
             fallback_used=(fallback_processed_count > 0 or force_fallback),
-            mapping_engine_version="2.0.0",
+            mapping_engine_version="2.2.0",
             run_status="COMPLETED",
             started_at=started_at,
             completed_at=completed_at,
         )
         self.repo.upsert_item(CosmosContainer.KPI_GOVERNANCE, tenant_id, run_doc.to_dict(), ctx)
+        t_persist_end = _pytime.time()
+        persist_duration_ms = round((t_persist_end - t_start_persist) * 1000, 2)
 
         logger.info(
-            "Pipeline completed for tenant %s in %.2fs: %d fields processed (LLM: %d, Fallback: %d, Reused: %d)",
+            "Stage 8/9 [PERSISTENCE]: %d mapping documents and run record '%s' persisted in %.2fms",
+            len(mappings_produced),
+            run_id,
+            persist_duration_ms,
+        )
+
+        # Stage 9: Overall Duration
+        logger.info(
+            "Stage 9/9 [PIPELINE_COMPLETED]: Tenant %s completed in %.2fs: %d fields (LLM: %d, Fallback: %d, Reused: %d, CircuitOpen: %s)",
             tenant_id,
             duration,
             total_fields,
             llm_processed_count,
             fallback_processed_count,
             auto_reused_count,
+            llm_circuit_open,
         )
 
         return {
@@ -377,10 +454,20 @@ class GovernanceService:
             "fallback_processed_count": fallback_processed_count,
             "status": "COMPLETED",
             "fallback_used": (fallback_processed_count > 0 or force_fallback),
+            "fallback_reason": llm_circuit_reason if llm_circuit_open else None,
+            "circuit_tripped": llm_circuit_open,
+            "circuit_reason": llm_circuit_reason,
             "primary_engine": "LLM_INFERENCE" if llm_processed_count > 0 else "DETERMINISTIC_FALLBACK",
             "started_at": started_at,
             "completed_at": completed_at,
             "duration_seconds": duration,
+            "stage_timings": {
+                "canonical_loaded_ms": canonical_duration_ms,
+                "domain_segregation_ms": domain_duration_ms,
+                "candidate_ranking_ms": round(total_ranking_time_ms, 2),
+                "persistence_ms": persist_duration_ms,
+                "overall_duration_seconds": duration,
+            },
         }
 
     # =========================================================================

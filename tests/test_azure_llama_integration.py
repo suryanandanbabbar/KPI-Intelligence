@@ -924,6 +924,156 @@ class TestAzureLlamaIntegration(unittest.TestCase):
         self.assertEqual(headers["Authorization"], "Bearer my-test-key-abc")
         self.assertEqual(headers["User-Agent"], "KPI-Intelligence-AzureLlama/1.0")
 
+    @patch("time.sleep")
+    @patch("urllib.request.urlopen")
+    def test_timeout_fast_fail_with_zero_timeout_retries(self, mock_urlopen, mock_sleep):
+        """Verifies that with max_timeout_retries=0, timeout fails fast without repeating 30s delays."""
+        config = AzureLlamaConfig(
+            azure_endpoint="https://my-foundry.services.ai.azure.com",
+            azure_deployment="llama-3.3-70b",
+            azure_llamakey="valid-key",
+            timeout_seconds=45.0,
+            max_retries=2,
+            max_timeout_retries=0,
+        )
+        client = AzureLlamaClient(config)
+        mock_urlopen.side_effect = urllib.error.URLError(reason=socket.timeout("timed out"))
+
+        with self.assertRaises(AzureLlamaClientError) as ctx:
+            client.generate_chat_completion("system", "user")
+
+        self.assertEqual(ctx.exception.category, "TIMEOUT")
+        self.assertIn("45.0s", ctx.exception.message)
+        self.assertEqual(mock_urlopen.call_count, 1)
+        mock_sleep.assert_not_called()
+
+    def test_circuit_breaker_prevents_cascading_timeouts_across_pipeline(self):
+        """
+        Verifies that when an LLM timeout occurs on field 1, the circuit breaker opens
+        and subsequent fields fast-failover to deterministic fallback instead of repeating the timeout.
+        """
+        gov_service = GovernanceService(
+            repository=self.repo,
+            kpi_bank_service=self.kpi_bank,
+            domain_service=self.domain_service,
+            matching_orchestrator=None,
+            learning_service=self.learning_service,
+        )
+
+        # Mock orchestrator matcher where LLM times out
+        mock_matcher = MagicMock()
+        call_count = 0
+
+        def mock_discover(metadata_field, domain=None, historical_overrides=None, force_fallback=False):
+            nonlocal call_count
+            call_count += 1
+            if not force_fallback and call_count == 1:
+                # First field encounters timeout and falls back
+                return {
+                    "input_fingerprint": "abc1",
+                    "matching_engine": "2.1.0-deterministic",
+                    "primary_engine": "LLM_INFERENCE",
+                    "fallback_used": True,
+                    "fallback_reason": "TIMEOUT: Azure AI Foundry request timed out after 45.0s.",
+                    "candidate_count": 1,
+                    "top_candidates": [{
+                        "kpi_id": "8d2a5fb0-1234-4567-89ab-cdef01234567",
+                        "kpi_name": "Incurred Losses",
+                        "confidence_code": "HIGH",
+                        "confidence_score": 0.88,
+                        "fallback_used": True,
+                        "decision_source": "DETERMINISTIC_FALLBACK",
+                    }],
+                }
+            else:
+                # Subsequent fields are called with force_fallback=True due to circuit breaker
+                return {
+                    "input_fingerprint": f"abc{call_count}",
+                    "matching_engine": "2.1.0-deterministic",
+                    "primary_engine": "LLM_INFERENCE",
+                    "fallback_used": True,
+                    "fallback_reason": "CIRCUIT_BREAKER_TRIPPED",
+                    "candidate_count": 1,
+                    "top_candidates": [{
+                        "kpi_id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+                        "kpi_name": "Earned Premium",
+                        "confidence_code": "HIGH",
+                        "confidence_score": 0.85,
+                        "fallback_used": True,
+                        "decision_source": "DETERMINISTIC_FALLBACK",
+                    }],
+                }
+
+        mock_matcher.discover_and_rank_candidates.side_effect = mock_discover
+        gov_service.matcher = mock_matcher
+
+        result = gov_service.run_mapping_pipeline(self.tenant_id, force_fallback=False)
+
+        self.assertTrue(result["fallback_used"])
+        self.assertTrue(result["circuit_tripped"])
+        self.assertIn("CIRCUIT_BREAKER_TRIPPED", result["circuit_reason"])
+        self.assertGreater(result["total_fields"], 1)
+        self.assertEqual(result["fallback_processed_count"], result["total_fields"])
+        self.assertEqual(result["llm_processed_count"], 0)
+
+        # Assert second call was executed with force_fallback=True
+        first_call_args = mock_matcher.discover_and_rank_candidates.call_args_list[0]
+        second_call_args = mock_matcher.discover_and_rank_candidates.call_args_list[1]
+        self.assertFalse(first_call_args.kwargs["force_fallback"])
+        self.assertTrue(second_call_args.kwargs["force_fallback"])
+
+    def test_timing_instrumentation_present_in_pipeline_output(self):
+        """Verifies that all 9 pipeline stages are timed and recorded in stage_timings."""
+        gov_service = GovernanceService(
+            repository=self.repo,
+            kpi_bank_service=self.kpi_bank,
+            domain_service=self.domain_service,
+            matching_orchestrator=None,
+            learning_service=self.learning_service,
+        )
+
+        result = gov_service.run_mapping_pipeline(self.tenant_id, force_fallback=True)
+
+        self.assertIn("stage_timings", result)
+        timings = result["stage_timings"]
+        self.assertIn("canonical_loaded_ms", timings)
+        self.assertIn("domain_segregation_ms", timings)
+        self.assertIn("candidate_ranking_ms", timings)
+        self.assertIn("persistence_ms", timings)
+        self.assertIn("overall_duration_seconds", timings)
+
+        self.assertGreaterEqual(timings["canonical_loaded_ms"], 0)
+        self.assertGreaterEqual(timings["domain_segregation_ms"], 0)
+        self.assertGreaterEqual(timings["candidate_ranking_ms"], 0)
+        self.assertGreaterEqual(timings["persistence_ms"], 0)
+        self.assertGreaterEqual(timings["overall_duration_seconds"], 0)
+
+    @patch("urllib.request.urlopen")
+    def test_deterministic_client_errors_do_not_retry_400_401_403(self, mock_urlopen):
+        """Verifies HTTP 400, 401, 403 deterministic client errors fast-fail with 0 retries."""
+        config = AzureLlamaConfig(
+            azure_endpoint="https://my-foundry.services.ai.azure.com",
+            azure_deployment="llama-3.3-70b",
+            azure_llamakey="test-key",
+            max_retries=3,
+        )
+        client = AzureLlamaClient(config)
+
+        for code in (400, 401, 403):
+            mock_urlopen.reset_mock()
+            mock_urlopen.side_effect = urllib.error.HTTPError(
+                url="https://test",
+                code=code,
+                msg="Client Error",
+                hdrs={},
+                fp=io.BytesIO(b'{"error": "Unauthorized"}'),
+            )
+
+            with self.assertRaises(AzureLlamaClientError):
+                client.generate_chat_completion("sys", "user")
+
+            self.assertEqual(mock_urlopen.call_count, 1)
+
 
 if __name__ == "__main__":
     unittest.main()
