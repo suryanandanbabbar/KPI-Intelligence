@@ -170,6 +170,18 @@ class MappingOverrideDocument(BaseDocument):
     normalised_justification: Optional[str] = None
     created_by_user_id: str = ""
     is_active: bool = True
+    # Reusable learning & re-ingestion fields
+    source_platform: str = "POWER_BI"
+    source_asset_id: str = ""
+    canonical_entity_type: str = "MEASURE"
+    canonical_entity_id: str = ""
+    canonical_source_fingerprint: str = ""
+    semantic_field_fingerprint: str = ""
+    domain_context: str = ""
+    original_candidates: List[Dict[str, Any]] = field(default_factory=list)
+    reuse_count: int = 0
+    last_reused_at: Optional[str] = None
+    match_method: str = "EXPLICIT_OVERRIDE"
 
     def validate(self) -> None:
         super().validate()

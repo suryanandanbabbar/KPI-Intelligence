@@ -3,11 +3,13 @@ __pycache__/
 *$py.class
 .DS_Store
 .venv/
-*.sqlite3
+
 *.sqlite3-wal
 *.sqlite3-shm
-local_data/
+
 .env
 .env.*
 !.env.example
-
+/frontend/dist/
+/frontend/node_modules/
+/node_modules/
